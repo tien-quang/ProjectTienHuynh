@@ -1,0 +1,11 @@
+This is the Rag chatbot use LangGraph and Langchain 
+THis just a basic , so we have everything basic you need from 0 to hero .
+If this effectively , like for me . thanks
+Start
+We use Frontend : Reactjs + css + vite
+Backend is Nodejs .
+LLM : gpt-4.0 or what do you want #. I recommend you use Gpt collabration Gemini ( its free )
+Database : Mongo Atlas : I thing you change that because its very hard for use and maintence . ( Recommend you mongo compass or Postgree sql)
+download that , i already vercel deploy frontend , i used to deploy backend by railway but vercel now for free both . 
+Vector DB : Chroma DB and Docker 
+Thanks for you read . 

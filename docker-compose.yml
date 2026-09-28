@@ -1,0 +1,70 @@
+version: "3.9"
+
+# LƯU Ý: bản này thay cho docker-compose.yml cũ — dự án đã migrate từ Python
+# ai-service sang xử lý RAG/LangGraph ngay trong backend Node.js, nên không
+# còn service "ai-service" riêng nữa. Backend gọi thẳng OpenAI + ChromaDB.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tttn_backend
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - MONGODB_URI=${MONGODB_URI}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - JWT_EXPIRES_IN=15m
+      - JWT_REFRESH_EXPIRES_IN=7d
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - VISION_MODEL=${VISION_MODEL:-gpt-4o-mini}
+      - CHROMA_URL=http://chromadb:8000
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      - chromadb
+    restart: unless-stopped
+    networks:
+      - tttn_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_BACKEND_URL=http://localhost:5000
+    container_name: tttn_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - tttn_network
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: tttn_chromadb
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ALLOW_RESET=TRUE
+    restart: unless-stopped
+    networks:
+      - tttn_network
+
+volumes:
+  chroma_data:
+  uploads_data:
+
+networks:
+  tttn_network:
+    driver: bridge
