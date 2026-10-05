@@ -2,29 +2,33 @@
 /**
  * backend/src/services/ragService.js
  *
- * LangGraph Multi-Agent RAG Pipeline — v2
- * ───────────────────────────────────────
- * Graph 1 — CHAT (nay có vòng lặp tự phản biện):
- *   START → memory → router → [doc_agent | product_agent | both_agent]
- *         → rerank(hybrid) → self_critique ─┬─(chưa đủ context)──→ router  (tối đa N lần)
- *                                            ├─(mơ hồ)────────────→ ask_clarify → END
- *                                            └─(đủ)───────────────→ generate → END
+ * LangGraph Multi-Agent RAG Pipeline — v3 (strict grounding + tiết kiệm token)
+ * ───────────────────────────────────────────────────────────────────────────
+ * Graph 1 — CHAT:
+ *   START → memory ─┬─(chitchat)──→ chitchat → END
+ *                   ├─(offtopic)──→ off_topic → END        (KHÔNG tốn thêm token)
+ *                   └─(lookup)────→ router → [doc_agent | product_agent | both_agent]
+ *         → rerank(hybrid) → expand → self_critique ─┬─(chưa đủ)──→ router (tối đa N lần)
+ *                                                     ├─(mơ hồ)────→ ask_clarify → END
+ *                                                     ├─(không có)─→ no_info → END   (KHÔNG gọi generate)
+ *                                                     └─(đủ)───────→ generate → END
  *
- * Graph 2 — INDEX (nay có kiểm tra trùng/lệch phiên bản + OCR/vision):
- *   START → extract(+vision OCR nếu scan/ảnh) → chunk → embed
- *         → version_check (so với tài liệu cũ cùng phòng ban)
- *         → save_chroma → update_mongo (đánh dấu supersede nếu cần) → END
+ * Graph 2 — INDEX: extract(+vision) → chunk → embed → version_check → save_chroma → update_mongo
+ * Graph 3 — PRODUCT: build_text → embed → upsert
  *
- * Graph 3 — PRODUCT: build_text → embed → upsert → END (không đổi)
- *
- * Thêm:
- *  ✓ OCR PDF scan + mô tả ảnh nhúng trong docx + ảnh upload trực tiếp (visionService)
- *  ✓ Tự động phát hiện tài liệu mới trùng/không còn đúng với tài liệu cũ → archive tài liệu cũ
- *  ✓ Lọc chunk thuộc tài liệu đã bị archive (isActive=false) khỏi kết quả truy xuất
- *  ✓ Vòng lặp tự phản biện (self-critique) + hỏi lại khi câu hỏi mơ hồ, thay vì trả lời liều
- *  ✓ Hybrid rerank (vector distance + keyword overlap)
- *  ✓ Streaming generate cho SSE
- *  ✓ Tóm tắt hội thoại dài + So sánh 1 tài liệu mới với kho tài liệu (dùng trong chat)
+ * Thay đổi so với v2 (giữ nguyên toàn bộ chức năng cũ):
+ *  ✓ Chặn trả lời khi tài liệu không có thông tin:
+ *      - ngưỡng khoảng cách vector chặt hơn (RAG_DOC_DIST / RAG_PROD_DIST, chỉnh được bằng .env)
+ *      - câu hỏi ngoài phạm vi (viết code, kiến thức chung...) bị chặn ngay ở bước memory
+ *      - không có chunk nào đạt ngưỡng → trả "không tìm thấy" luôn, KHÔNG gọi LLM generate
+ *      - prompt generate cấm dùng kiến thức bên ngoài; không có thông tin → model trả [NO_INFO]
+ *        → hệ thống đổi thành thông báo chuẩn và KHÔNG hiển thị nguồn
+ *  ✓ Chống bịa: temperature 0, ép trích đúng số liệu/tên trong tài liệu
+ *  ✓ Tiết kiệm token:
+ *      - gộp phân loại router vào lời gọi memory (bỏ 1 lần gọi LLM mỗi câu hỏi)
+ *      - câu hỏi ngoài phạm vi / không có dữ liệu → dừng sớm
+ *      - chỉ gửi lịch sử hội thoại vào generate khi câu hỏi thật sự là câu tiếp nối
+ *      - retry tự phản biện chỉ chạy khi đã có chunk nhưng chưa đủ
  */
 
 const fs   = require('fs');
@@ -40,16 +44,27 @@ const visionService     = require('./visionService');
 const CHUNK_SIZE    = 800;
 const CHUNK_OVERLAP = 150;
 const TOP_K         = 6;
-const DOC_DIST      = 1.9;
-const PROD_DIST     = 2.0;
+// Khoảng cách vector (Chroma mặc định L2 bình phương, embedding đã chuẩn hoá: 0 = giống hệt, ~2 = không liên quan).
+// Cũ là 1.9/2.0 (gần như chunk nào cũng lọt qua → model trả lời bừa). Nếu bạn thấy bot từ chối nhầm
+// câu hỏi đúng thì tăng nhẹ qua .env (RAG_DOC_DIST=1.3); nếu vẫn trả lời bừa thì giảm (RAG_DOC_DIST=1.1).
+const DOC_DIST      = Number(process.env.RAG_DOC_DIST)  || 1.2;
+const PROD_DIST     = Number(process.env.RAG_PROD_DIST) || 1.2;
+const FOCUS_DIST    = DOC_DIST + 0.2;   // ngưỡng khi tìm trong tài liệu vừa dùng ở lượt trước (câu hỏi tiếp nối)
+const WEAK_DIST     = 0.8;              // match yếu hơn mức này → cho LLM rerank được quyền loại bỏ hết
 const MIN_CHARS_PER_PAGE      = 40;   // dưới ngưỡng này → coi PDF là bản scan
-const MAX_SELF_CRITIQUE_RETRY = 2;    // số lần agent tự tìm lại trước khi hỏi lại người dùng
+const MAX_SELF_CRITIQUE_RETRY = 2;    // số lần agent tự tìm lại trước khi dừng
 const SUPERSEDE_DIST          = 0.35; // càng nhỏ càng "cùng một chủ đề/nội dung"
 const COMPARE_DIST            = 0.9;  // ngưỡng lỏng hơn dùng khi so sánh thủ công trong chat
 const SUMMARY_TRIGGER         = 24;   // số message bắt đầu tóm tắt bớt lịch sử
 const SUMMARY_KEEP_RECENT     = 10;
 const CHAT_MODEL              = process.env.CHAT_MODEL || 'gpt-4o-mini'; // model cho rewrite/critique/generate
 const FULL_DOC_MAX_CHARS      = 20000; // trần ký tự khi nạp trọn 1 tài liệu (câu hỏi đếm/liệt kê/theo số mục)
+
+// ── Thông báo chuẩn & cờ [NO_INFO] ────────────────────────────────────
+const NO_INFO_TAG = '[NO_INFO]';
+const NO_INFO_MSG = 'Tôi chưa tìm thấy thông tin này trong tài liệu nội bộ đã được tải lên. Bạn có thể hỏi cụ thể hơn, hoặc kiểm tra xem tài liệu liên quan đã được tải lên hệ thống chưa.';
+const OFF_TOPIC_MSG = 'Tôi chỉ hỗ trợ trả lời dựa trên tài liệu nội bộ và dữ liệu sản phẩm đã được tải lên hệ thống. Câu hỏi này nằm ngoài phạm vi đó nên tôi không trả lời. Bạn thử hỏi về nội dung trong tài liệu nhé!';
+const isNoInfo = (s) => (s || '').trim().startsWith(NO_INFO_TAG);
 
 // ── Singletons ────────────────────────────────────────────────────────
 let _chroma = null;
@@ -179,7 +194,7 @@ function keywordScore(text, query) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// GRAPH 1 — CHAT GRAPH (Multi-Agent + Self-Critique Loop)
+// GRAPH 1 — CHAT GRAPH (Multi-Agent + Self-Critique Loop + Strict Grounding)
 // ══════════════════════════════════════════════════════════════════════
 
 const ChatState = Annotation.Root({
@@ -192,11 +207,13 @@ const ChatState = Annotation.Root({
   isAdmin:             Annotation({ reducer: (_, b) => b ?? _, default: () => false }),
   expandedQ:           Annotation({ reducer: (_, b) => b ?? _, default: () => '' }),
   queryType:           Annotation({ reducer: (_, b) => b ?? _, default: () => 'doc' }),
+  typeResolved:        Annotation({ reducer: (_, b) => b ?? _, default: () => false }),
   qVec:                Annotation({ reducer: (_, b) => b ?? _, default: () => [] }),
   chunks:              Annotation({ reducer: (_, b) => b ?? _, default: () => [] }),
   hasCtx:              Annotation({ reducer: (_, b) => b ?? _, default: () => true }),
   retryCount:          Annotation({ reducer: (_, b) => b ?? _, default: () => 0 }),
   clarify:             Annotation({ reducer: (_, b) => b ?? _, default: () => false }),
+  noInfo:              Annotation({ reducer: (_, b) => b ?? _, default: () => false }),
   followUp:            Annotation({ reducer: (_, b) => b ?? _, default: () => false }),
   intent:              Annotation({ reducer: (_, b) => b ?? _, default: () => 'lookup' }),
   needFullDoc:         Annotation({ reducer: (_, b) => b ?? _, default: () => false }),
@@ -207,10 +224,10 @@ const ChatState = Annotation.Root({
 });
 
 // ── Helpers ngữ cảnh hội thoại ────────────────────────────────────────
-function recentTurns(history, n = 8) {
+function recentTurns(history, n = 6) {
   return (history || []).slice(-n).map(m => ({
     role: m.role,
-    text: (m.content || '').slice(0, m.role === 'user' ? 500 : 900),
+    text: (m.content || '').slice(0, m.role === 'user' ? 400 : 600),
   }));
 }
 
@@ -229,9 +246,10 @@ function lastSourceDocs(history) {
   return docs;
 }
 
-// ── Node: Memory — hiểu câu hỏi trong ngữ cảnh cả hội thoại ─────────────
-// Một lời gọi LLM duy nhất quyết định: câu mới có liên quan lượt trước không,
-// viết lại thành câu hỏi độc lập, phân loại ý định, có cần đọc trọn tài liệu không.
+// ── Node: Memory — hiểu câu hỏi trong ngữ cảnh + phân loại ý định + loại câu hỏi ──
+// Một lời gọi LLM duy nhất (đã gộp luôn bước phân loại router để tiết kiệm token):
+// câu mới có liên quan lượt trước không, viết lại độc lập, ý định (xã giao / ngoài phạm vi / tra cứu),
+// loại dữ liệu cần tra (doc/product/both), có cần đọc trọn tài liệu không.
 async function nodeMemory(state) {
   const history = state.history || [];
   const q       = state.question.trim();
@@ -249,55 +267,86 @@ async function nodeMemory(state) {
       role: 'user',
       content: `${ctxBlock ? ctxBlock + '\n\n' : ''}Câu hỏi mới của người dùng: "${q}"
 
-Nhiệm vụ: phân tích câu hỏi mới trong ngữ cảnh hội thoại (nếu có). Trả JSON:
+Bạn là bộ phân loại cho chatbot CHỈ trả lời dựa trên tài liệu nội bộ và dữ liệu sản phẩm của công ty. Trả JSON:
 {
  "related": true|false,
  "standalone": "...",
- "intent": "chitchat"|"lookup",
+ "intent": "chitchat"|"offtopic"|"lookup",
+ "type": "doc"|"product"|"both",
  "needFullDoc": true|false
 }
 - related: câu mới có tiếp nối/liên quan chủ đề các lượt trước không.
 - standalone: câu hỏi viết lại ĐỘC LẬP, đủ chủ thể/đối tượng, tiếng Việt. Nếu related=true: bổ sung chủ đề/tài liệu/mục đang nói từ các lượt trước (giải quyết các từ như "nó", "mục đó", "còn cái kia", "6.1-6.5"). Nếu related=false: giữ nguyên ý câu hỏi, TUYỆT ĐỐI không chèn chủ đề cũ.
-- intent: "chitchat" nếu chỉ chào hỏi/cảm ơn/hỏi về chính chatbot (không cần tra tài liệu); còn lại "lookup".
+- intent:
+   "chitchat": chỉ chào hỏi/cảm ơn/tạm biệt/hỏi về chính chatbot.
+   "offtopic": nhờ AI làm việc chung KHÔNG liên quan tài liệu/sản phẩm nội bộ (viết code mẫu, giải toán, dịch thuật, viết văn, kiến thức phổ thông, tin tức, chứng khoán, thời tiết...). Nếu câu hỏi có thể là về nội dung tài liệu nội bộ (nhắc "trong tài liệu", tên file, quy định/chính sách/quy trình/đề tài của công ty) thì KHÔNG phải offtopic.
+   "lookup": mọi trường hợp còn lại (hỏi nội dung tài liệu hoặc sản phẩm).
+- type (chỉ cần khi lookup): "product" nếu hỏi về sản phẩm/giá/tồn kho; "both" nếu cần cả tài liệu lẫn sản phẩm; "doc" cho còn lại.
 - needFullDoc: true nếu cần xem trọn tài liệu để trả lời đúng: đếm số lượng, liệt kê tất cả mục/bước, tóm tắt toàn bộ, hoặc hỏi theo số mục/chương (vd 6.1, mục 3).`,
     }], { temperature: 0, maxTokens: 300, json: true });
 
     const p = JSON.parse(content);
-    const related = p.related === true && turns.length > 0;
+    const related    = p.related === true && turns.length > 0;
     const standalone = (p.standalone || '').trim() || q;
-    console.log(`[Memory] related=${related} intent=${p.intent} fullDoc=${p.needFullDoc} | "${q}" → "${standalone}"`);
+    // câu tiếp nối thì không bao giờ coi là offtopic (vd "còn cái kia?")
+    const intent = p.intent === 'chitchat' ? 'chitchat'
+                 : (p.intent === 'offtopic' && !related) ? 'offtopic'
+                 : 'lookup';
+    const queryType = ['doc', 'product', 'both'].includes(p.type) ? p.type : 'doc';
+    console.log(`[Memory] related=${related} intent=${intent} type=${queryType} fullDoc=${p.needFullDoc} | "${q}" → "${standalone}"`);
     return {
-      expandedQ:   standalone,
-      followUp:    related,
-      intent:      p.intent === 'chitchat' ? 'chitchat' : 'lookup',
-      needFullDoc: p.needFullDoc === true,
-      focusDocIds: related ? prevDocs.map(d => d.documentId) : [],
+      expandedQ:    standalone,
+      followUp:     related,
+      intent,
+      queryType,
+      typeResolved: true,
+      needFullDoc:  p.needFullDoc === true,
+      focusDocIds:  related ? prevDocs.map(d => d.documentId) : [],
     };
   } catch (e) {
     console.warn('[Memory] lỗi, dùng câu hỏi gốc:', e.message);
-    return { expandedQ: q, followUp: false, intent: 'lookup', needFullDoc: false, focusDocIds: [] };
+    return { expandedQ: q, followUp: false, intent: 'lookup', typeResolved: false, needFullDoc: false, focusDocIds: [] };
   }
 }
 
 function routeAfterMemory(state) {
-  return state.intent === 'chitchat' ? 'chitchat' : 'router';
+  if (state.intent === 'chitchat') return 'chitchat';
+  if (state.intent === 'offtopic') return 'off_topic';
+  return 'router';
 }
 
 // ── Node: Chitchat — xã giao, không tra tài liệu ────────────────────────
 async function nodeChitchat(state) {
   const messages = [{
     role: 'system',
-    content: `${state.systemPrompt || 'Bạn là trợ lý AI nội bộ của công ty, trả lời bằng tiếng Việt.'}\nĐây là câu xã giao/hỏi về trợ lý: trả lời ngắn gọn, thân thiện, không cần tra cứu tài liệu. Nếu người dùng cần thông tin nghiệp vụ, mời họ nêu rõ câu hỏi.`,
+    content: `${state.systemPrompt || 'Bạn là trợ lý AI nội bộ của công ty, trả lời bằng tiếng Việt.'}\nĐây là câu xã giao/hỏi về trợ lý: trả lời ngắn gọn (1-2 câu), thân thiện, không tra cứu tài liệu. Bạn chỉ hỗ trợ giải đáp dựa trên tài liệu nội bộ và dữ liệu sản phẩm; tuyệt đối không đưa ra thông tin/kiến thức ngoài phạm vi đó. Nếu người dùng cần thông tin nghiệp vụ, mời họ nêu rõ câu hỏi.`,
   }];
-  recentTurns(state.history, 6).forEach(t => messages.push({ role: t.role, content: t.text }));
+  recentTurns(state.history, 2).forEach(t => messages.push({ role: t.role, content: t.text }));
   messages.push({ role: 'user', content: state.question });
-  const { content, tokens } = await llm(messages, { temperature: 0.4, maxTokens: 300 });
+  const { content, tokens } = await llm(messages, { temperature: 0.3, maxTokens: 150 });
   return { answer: content, sources: [], tokens };
 }
 
+// ── Node: Off-topic — câu hỏi ngoài phạm vi, từ chối ngay (không tốn thêm token) ──
+function nodeOffTopic() {
+  console.log('[OffTopic] chặn câu hỏi ngoài phạm vi tài liệu');
+  return { answer: OFF_TOPIC_MSG, sources: [], tokens: 0 };
+}
+
+// ── Node: No Info — không có dữ liệu liên quan, trả lời chuẩn (không gọi generate) ──
+function nodeNoInfo() {
+  console.log('[NoInfo] không có chunk đạt ngưỡng → không gọi generate');
+  return { answer: NO_INFO_MSG, sources: [], tokens: 0 };
+}
+
 // ── Node: Router ─────────────────────────────────────────────────────
+// Loại câu hỏi đã được nodeMemory phân loại sẵn → không gọi LLM nữa.
+// Chỉ gọi LLM khi memory lỗi (typeResolved=false).
 async function nodeRouter(state) {
   const q = state.expandedQ || state.question;
+  if (state.typeResolved) {
+    return { queryType: state.queryType || 'doc', expandedQ: q };
+  }
   try {
     const { content } = await llm([{
       role: 'user',
@@ -340,11 +389,12 @@ async function queryCollection(name, vec, dist, topK, where) {
 
 // Tìm tài liệu ở các phòng ban; nếu là câu hỏi tiếp nối thì tìm thêm TRONG đúng
 // những tài liệu vừa được dùng ở lượt trước (focusDocIds) để không lạc sang tài liệu khác.
+// (Ngưỡng của lần tìm focus vẫn bị chặn bởi FOCUS_DIST — không còn nhận mọi chunk bất kể liên quan.)
 async function searchDocs(deptCodes, vec, focusDocIds) {
   const tasks = deptCodes.map(c => queryCollection(toColName(c), vec, DOC_DIST, TOP_K));
   if (focusDocIds?.length) {
     deptCodes.forEach(c => tasks.push(
-      queryCollection(toColName(c), vec, 10, TOP_K, { document_id: { $in: focusDocIds } })
+      queryCollection(toColName(c), vec, FOCUS_DIST, TOP_K, { document_id: { $in: focusDocIds } })
     ));
   }
   const all = (await Promise.all(tasks)).flat();
@@ -363,13 +413,15 @@ async function resolveDeptCodes(state) {
   } catch { return ['HR', 'IT', 'SALES', 'ACCOUNTING']; }
 }
 
+const bestDist = (chunks) => chunks.length ? Math.min(...chunks.map(c => c.dist)).toFixed(3) : 'n/a';
+
 // ── Node: Doc Agent ──────────────────────────────────────────────────
 async function nodeDocAgent(state) {
   console.log(`[DocAgent] dept=${state.deptCode} admin=${state.isAdmin} focus=${state.focusDocIds?.length || 0}`);
   const [vec] = await embedTexts([state.expandedQ]);
   const deptCodes = await resolveDeptCodes(state);
   const chunks = await searchDocs(deptCodes, vec, state.focusDocIds);
-  console.log(`[DocAgent] ${chunks.length} chunks`);
+  console.log(`[DocAgent] ${chunks.length} chunks | best dist=${bestDist(chunks)} (ngưỡng ${DOC_DIST})`);
   return { qVec: vec, chunks, hasCtx: chunks.length > 0 };
 }
 
@@ -379,7 +431,7 @@ async function nodeProductAgent(state) {
   const vec = state.qVec?.length ? state.qVec : (await embedTexts([state.expandedQ]))[0];
   const chunks = await queryCollection('tttn_products', vec, PROD_DIST, TOP_K);
   const prodChunks = chunks.map(c => ({ ...c, isProd: true, docName: c.docName || 'Catalog sản phẩm' }));
-  console.log(`[ProductAgent] ${prodChunks.length} products`);
+  console.log(`[ProductAgent] ${prodChunks.length} products | best dist=${bestDist(prodChunks)} (ngưỡng ${PROD_DIST})`);
   return { qVec: vec, chunks: prodChunks, hasCtx: prodChunks.length > 0 };
 }
 
@@ -395,6 +447,7 @@ async function nodeBothAgent(state) {
   ]);
 
   const chunks = [...docResults, ...prodResults].sort((a, b) => a.dist - b.dist).slice(0, TOP_K + 2);
+  console.log(`[BothAgent] ${chunks.length} chunks | best dist=${bestDist(chunks)}`);
   return { qVec: vec, chunks, hasCtx: chunks.length > 0 };
 }
 
@@ -414,16 +467,21 @@ async function nodeRerank(state) {
 
   if (chunks.length <= 4 || state.needFullDoc) return { chunks, hasCtx: true };
 
+  const weakMatch = Math.min(...chunks.map(c => c.dist)) > WEAK_DIST;
+
   try {
     const list = chunks.slice(0, 8).map((c, i) => `[${i}] ${c.text.slice(0, 200)}`).join('\n\n');
     const { content } = await llm([{
       role: 'user',
-      content: `Câu hỏi: "${q}"\n\nChọn tối đa 4 đoạn liên quan nhất:\n${list}\n\nJSON: {"ids":[<các số 0-based>]}`,
+      content: `Câu hỏi: "${q}"\n\nChọn tối đa 4 đoạn liên quan nhất:\n${list}\n\nJSON: {"ids":[<các số 0-based>]}${weakMatch ? '\nNếu KHÔNG có đoạn nào thực sự chứa thông tin để trả lời câu hỏi, trả {"ids":[]}.' : ''}`,
     }], { temperature: 0, maxTokens: 80, json: true });
     const { ids } = JSON.parse(content);
-    if (Array.isArray(ids) && ids.length > 0) {
-      const ranked = ids.filter(i => i >= 0 && i < chunks.length).map(i => chunks[i]);
-      return { chunks: ranked, hasCtx: ranked.length > 0 };
+    if (Array.isArray(ids)) {
+      if (ids.length === 0 && weakMatch) return { chunks: [], hasCtx: false }; // match yếu + LLM bảo không đoạn nào liên quan
+      if (ids.length > 0) {
+        const ranked = ids.filter(i => i >= 0 && i < chunks.length).map(i => chunks[i]);
+        if (ranked.length) return { chunks: ranked, hasCtx: true };
+      }
     }
   } catch {}
   return { chunks: chunks.slice(0, 4), hasCtx: true };
@@ -474,32 +532,36 @@ async function nodeExpand(state) {
 }
 
 // ── Node: Self-Critique ─────────────────────────────────────────────────
-// Tự chấm xem context đủ chưa; nếu chưa → viết lại câu hỏi và quay lại router
-// (tối đa MAX_SELF_CRITIQUE_RETRY lần). Chỉ hỏi lại người dùng khi KHÔNG tìm thấy gì
-// và câu hỏi vẫn mơ hồ dù đã dùng ngữ cảnh hội thoại.
+// - Không có chunk nào đạt ngưỡng: dừng ngay (không retry, không tốn token).
+//     · câu hỏi quá ngắn/mơ hồ (≤ 2 từ, không phải câu tiếp nối) → hỏi lại người dùng
+//     · còn lại → noInfo (trả "không tìm thấy trong tài liệu")
+// - Có chunk nhưng chưa chắc đủ: LLM tự chấm; chưa đủ thì viết lại câu hỏi và tìm lại (tối đa N lần).
+//   Nếu hết lượt retry vẫn đi tiếp sang generate — generate có chốt chặn [NO_INFO] chống bịa.
 async function nodeSelfCritique(state) {
   const retryCount = state.retryCount || 0;
   const chunks = state.chunks || [];
   const q = state.expandedQ || state.question;
 
   if (chunks[0]?.full) return { hasCtx: true };
-  if (chunks.length >= 2 && (chunks[0]?.dist ?? 2) < 0.6) return { hasCtx: true };
 
-  if (retryCount >= MAX_SELF_CRITIQUE_RETRY) {
-    return chunks.length > 0 ? { hasCtx: true } : { clarify: true, hasCtx: false };
+  if (!chunks.length) {
+    const words = q.trim().split(/\s+/).filter(Boolean).length;
+    if (words <= 2 && !state.followUp) return { clarify: true, hasCtx: false };
+    return { noInfo: true, hasCtx: false };
   }
 
+  if (chunks.length >= 2 && (chunks[0]?.dist ?? 2) < 0.6) return { hasCtx: true };
+
+  if (retryCount >= MAX_SELF_CRITIQUE_RETRY) return { hasCtx: true };
+
   try {
-    const preview = chunks.length
-      ? chunks.slice(0, 4).map((c, i) => `[${i}] ${c.text.slice(0, 180)}`).join('\n')
-      : '(không tìm thấy đoạn nào liên quan)';
+    const preview = chunks.slice(0, 4).map((c, i) => `[${i}] ${c.text.slice(0, 180)}`).join('\n');
     const { content } = await llm([{
       role: 'user',
-      content: `Câu hỏi: "${q}"\n\nNgữ cảnh tìm được:\n${preview}\n\nNgữ cảnh này có đủ để trả lời chính xác, đầy đủ câu hỏi không?\nJSON: {"sufficient":true|false,"needClarify":true|false,"reformulate":"<viết lại câu hỏi để tìm kiếm tốt hơn, nếu cần>"}\n- needClarify=true CHỈ khi không tìm thấy đoạn nào và câu hỏi quá mơ hồ để tra cứu.`,
-    }], { temperature: 0, maxTokens: 150, json: true });
+      content: `Câu hỏi: "${q}"\n\nNgữ cảnh tìm được:\n${preview}\n\nNgữ cảnh này có THỰC SỰ chứa thông tin để trả lời chính xác, đầy đủ câu hỏi không?\nJSON: {"sufficient":true|false,"reformulate":"<viết lại câu hỏi để tìm kiếm tốt hơn, nếu cần>"}`,
+    }], { temperature: 0, maxTokens: 120, json: true });
     const parsed = JSON.parse(content);
 
-    if (parsed.needClarify && chunks.length === 0) return { clarify: true, hasCtx: false };
     if (parsed.sufficient === false) {
       return { retryCount: retryCount + 1, expandedQ: (parsed.reformulate || '').trim() || q, hasCtx: false };
     }
@@ -510,6 +572,7 @@ async function nodeSelfCritique(state) {
 
 function routeAfterCritique(state) {
   if (state.clarify) return 'clarify';
+  if (state.noInfo)  return 'no_info';
   if (!state.hasCtx) return 'retry';
   return 'generate';
 }
@@ -520,7 +583,7 @@ async function nodeAskClarify(state) {
   try {
     const { content } = await llm([{
       role: 'user',
-      content: `${recent ? `Hội thoại gần đây:\n${recent}\n\n` : ''}Câu hỏi hiện tại: "${state.question}"\nKhông tìm thấy thông tin phù hợp và câu hỏi chưa đủ rõ. Viết 1 câu hỏi lại ngắn gọn, thân thiện bằng tiếng Việt để người dùng làm rõ (đề xuất cụ thể nếu đoán được). Chỉ trả về câu hỏi.`,
+      content: `${recent ? `Hội thoại gần đây:\n${recent}\n\n` : ''}Câu hỏi hiện tại: "${state.question}"\nKhông tìm thấy thông tin phù hợp và câu hỏi chưa đủ rõ. Viết 1 câu hỏi lại ngắn gọn, thân thiện bằng tiếng Việt để người dùng làm rõ. Chỉ trả về câu hỏi, không tự đưa thông tin.`,
     }], { temperature: 0.3, maxTokens: 100 });
     return { answer: content.trim(), sources: [], tokens: 0 };
   } catch {
@@ -538,19 +601,26 @@ function buildGenerateMessages(state) {
   const systemMsg =
 `${basePrompt}
 
-QUY TẮC TRẢ LỜI:
-1. Trả lời dựa trên TÀI LIỆU NỘI BỘ bên dưới. Nếu tài liệu không có thông tin, nói rõ là tài liệu chưa đề cập — không bịa.
-2. Bạn đang trong một cuộc hội thoại liên tục: dùng các lượt trước để hiểu người dùng đang nói về gì và trả lời nhất quán với những gì đã nói. Nếu câu hỏi hiện tại KHÔNG liên quan các lượt trước thì bỏ qua lịch sử, đừng trộn chủ đề cũ vào.
-3. Khi hỏi về số lượng / danh sách / các mục: đếm và liệt kê đầy đủ, theo đúng thứ tự trong tài liệu.
-4. Cuối câu trả lời ghi (Nguồn: tên_file) cho thông tin quan trọng.${state.conversationSummary ? `\n\nTóm tắt phần hội thoại cũ:\n${state.conversationSummary}` : ''}
+QUY TẮC BẮT BUỘC (trả lời sai quy tắc là lỗi nghiêm trọng):
+1. CHỈ được dùng thông tin có trong phần "TÀI LIỆU" bên dưới. TUYỆT ĐỐI KHÔNG dùng kiến thức bên ngoài, kiến thức chung, hay suy đoán — kể cả khi bạn biết câu trả lời.
+2. Nếu TÀI LIỆU hoàn toàn không chứa thông tin để trả lời câu hỏi, hãy trả lời DUY NHẤT đúng chuỗi: ${NO_INFO_TAG} (không thêm chữ nào khác).
+3. Nếu TÀI LIỆU chỉ trả lời được một phần, chỉ nêu phần có trong tài liệu và nói rõ phần còn lại tài liệu chưa đề cập. Không tự bổ sung.
+4. Mọi con số, tên, ngày tháng, giá, điều khoản phải trích đúng như trong tài liệu; không làm tròn, không đoán.
+5. Khi hỏi về số lượng / danh sách / các mục: đếm và liệt kê đầy đủ, theo đúng thứ tự trong tài liệu.
+6. Không viết code, không giải thích kiến thức chung, không làm việc ngoài phạm vi tài liệu dù được yêu cầu.
+7. Chỉ dùng lịch sử hội thoại (nếu có) để hiểu câu hỏi tiếp nối; không lấy lịch sử làm nguồn thông tin.
+8. Trả lời ngắn gọn, đúng trọng tâm. Cuối câu trả lời ghi (Nguồn: tên_file) cho thông tin quan trọng.${state.conversationSummary ? `\n\nTóm tắt phần hội thoại cũ (chỉ để hiểu ngữ cảnh):\n${state.conversationSummary}` : ''}
 
 TÀI LIỆU:
 ${contextText}`;
 
   const messages = [{ role: 'system', content: systemMsg }];
-  (state.history || []).slice(-8).forEach(m => {
-    if (['user', 'assistant'].includes(m.role)) messages.push({ role: m.role, content: (m.content || '').slice(0, 1500) });
-  });
+  // Chỉ gửi lịch sử khi câu hỏi là câu tiếp nối → tiết kiệm token và tránh trộn chủ đề cũ / câu trả lời cũ sai
+  if (state.followUp) {
+    (state.history || []).slice(-4).forEach(m => {
+      if (['user', 'assistant'].includes(m.role)) messages.push({ role: m.role, content: (m.content || '').slice(0, 800) });
+    });
+  }
   messages.push({
     role: 'user',
     content: interpreted ? `${state.question}\n\n(Hiểu theo ngữ cảnh hội thoại: ${state.expandedQ})` : state.question,
@@ -579,10 +649,14 @@ function buildSources(chunks) {
 async function nodeGenerate(state) {
   if (!state.hasCtx || !state.chunks?.length) {
     console.log('[Generate] No context found');
-    return { answer: `Tôi chưa tìm thấy thông tin về "${state.expandedQ || state.question}" trong tài liệu nội bộ.`, sources: [], tokens: 0 };
+    return { answer: NO_INFO_MSG, sources: [], tokens: 0 };
   }
   const messages = buildGenerateMessages(state);
-  const { content, tokens } = await llm(messages, { temperature: 0.15, maxTokens: 1200 });
+  const { content, tokens } = await llm(messages, { temperature: 0, maxTokens: 1200 });
+  if (isNoInfo(content)) {
+    console.log(`[Generate] model báo [NO_INFO] → trả thông báo chuẩn, không kèm nguồn (${tokens} tokens)`);
+    return { answer: NO_INFO_MSG, sources: [], tokens };
+  }
   console.log(`[Generate] ✓ ${tokens} tokens | ${state.chunks.length} chunks`);
   return { answer: content, sources: buildSources(state.chunks), tokens };
 }
@@ -595,6 +669,7 @@ function getChatGraph() {
   _chatGraph = new StateGraph(ChatState)
     .addNode('memory',        nodeMemory)
     .addNode('chitchat',      nodeChitchat)
+    .addNode('off_topic',     nodeOffTopic)
     .addNode('router',        nodeRouter)
     .addNode('doc_agent',     nodeDocAgent)
     .addNode('product_agent', nodeProductAgent)
@@ -603,9 +678,10 @@ function getChatGraph() {
     .addNode('expand',        nodeExpand)
     .addNode('self_critique', nodeSelfCritique)
     .addNode('ask_clarify',   nodeAskClarify)
+    .addNode('no_info',       nodeNoInfo)
     .addNode('generate',      nodeGenerate)
     .addEdge(START,           'memory')
-    .addConditionalEdges('memory', routeAfterMemory, { chitchat: 'chitchat', router: 'router' })
+    .addConditionalEdges('memory', routeAfterMemory, { chitchat: 'chitchat', off_topic: 'off_topic', router: 'router' })
     .addConditionalEdges('router', routeAgent, {
       doc_agent: 'doc_agent', product_agent: 'product_agent', both_agent: 'both_agent',
     })
@@ -615,14 +691,16 @@ function getChatGraph() {
     .addEdge('rerank',        'expand')
     .addEdge('expand',        'self_critique')
     .addConditionalEdges('self_critique', routeAfterCritique, {
-      retry: 'router', clarify: 'ask_clarify', generate: 'generate',
+      retry: 'router', clarify: 'ask_clarify', no_info: 'no_info', generate: 'generate',
     })
     .addEdge('chitchat',      END)
+    .addEdge('off_topic',     END)
     .addEdge('ask_clarify',   END)
+    .addEdge('no_info',       END)
     .addEdge('generate',      END)
     .compile();
 
-  console.log('[LangGraph] ✓ Chat: memory→(chitchat | router→[doc|product|both]→rerank→expand→self_critique→(retry|clarify|generate))');
+  console.log('[LangGraph] ✓ Chat: memory→(chitchat | off_topic | router→[doc|product|both]→rerank→expand→self_critique→(retry|clarify|no_info|generate))');
   return _chatGraph;
 }
 
@@ -920,6 +998,9 @@ async function ragQueryStream({ question, departmentCode, departmentName, system
     retryCount: 0,
     focusDocIds: [],
     needFullDoc: false,
+    typeResolved: false,
+    noInfo: false,
+    clarify: false,
   };
   let full = '';
   let tokens = 0;
@@ -938,6 +1019,12 @@ async function ragQueryStream({ question, departmentCode, departmentName, system
       return r;
     }
 
+    if (state.intent === 'offtopic') {
+      const r = nodeOffTopic();
+      if (onDelta) onDelta(r.answer);
+      return r;
+    }
+
     for (let attempt = 0; attempt <= MAX_SELF_CRITIQUE_RETRY; attempt++) {
       status('searching');
       state = { ...state, ...(await nodeRouter(state)) };
@@ -951,7 +1038,7 @@ async function ragQueryStream({ question, departmentCode, departmentName, system
       guard();
       state = { ...state, ...(await nodeSelfCritique(state)) };
       guard();
-      if (state.clarify || state.hasCtx) break;
+      if (state.clarify || state.noInfo || state.hasCtx) break;
     }
 
     if (state.clarify) {
@@ -960,29 +1047,54 @@ async function ragQueryStream({ question, departmentCode, departmentName, system
       if (onDelta) onDelta(r.answer);
       return r;
     }
-    if (!state.hasCtx || !state.chunks?.length) {
-      const answer = `Tôi chưa tìm thấy thông tin về "${state.expandedQ || state.question}" trong tài liệu nội bộ.`;
-      if (onDelta) onDelta(answer);
-      return { answer, sources: [], tokens: 0 };
+    if (state.noInfo || !state.hasCtx || !state.chunks?.length) {
+      const r = nodeNoInfo();
+      if (onDelta) onDelta(r.answer);
+      return r;
     }
 
     status('writing');
     const messages = buildGenerateMessages(state);
     const stream = await getOpenAI().chat.completions.create(
-      { model: CHAT_MODEL, messages, temperature: 0.15, max_tokens: 1200, stream: true, stream_options: { include_usage: true } },
+      { model: CHAT_MODEL, messages, temperature: 0, max_tokens: 1200, stream: true, stream_options: { include_usage: true } },
       { signal },
     );
+
+    // Đệm vài ký tự đầu để phát hiện [NO_INFO] trước khi đẩy chữ nào xuống UI.
+    let pending = '';
+    let decided = false;
+    let noInfo  = false;
 
     for await (const part of stream) {
       if (part.usage?.total_tokens) tokens = part.usage.total_tokens;
       const delta = part.choices?.[0]?.delta?.content || '';
-      if (delta) { full += delta; if (onDelta) onDelta(delta); }
+      if (!delta) continue;
+      full += delta;
+
+      if (decided) { if (onDelta) onDelta(delta); continue; }
+
+      pending += delta;
+      const head = pending.trimStart();
+      if (head.startsWith(NO_INFO_TAG)) { noInfo = true; break; }
+      if (!NO_INFO_TAG.startsWith(head)) {   // chắc chắn không phải [NO_INFO] → xả bộ đệm, stream bình thường
+        decided = true;
+        if (onDelta) onDelta(pending);
+        pending = '';
+      }
     }
+
+    if (noInfo) {
+      console.log('[RAG] model báo [NO_INFO] → trả thông báo chuẩn, không kèm nguồn');
+      if (onDelta) onDelta(NO_INFO_MSG);
+      return { answer: NO_INFO_MSG, sources: [], tokens };
+    }
+    if (!decided && pending) { if (onDelta) onDelta(pending); } // câu trả lời rất ngắn, chưa kịp xả
     return { answer: full, sources: buildSources(state.chunks), tokens };
   } catch (e) {
     if (e.aborted || signal?.aborted || e.name === 'APIUserAbortError') {
       console.log(`[RAG] stream bị huỷ bởi client (đã viết ${full.length} ký tự)`);
-      return { answer: full, sources: full ? buildSources(state.chunks || []) : [], tokens, aborted: true };
+      const partial = isNoInfo(full) ? '' : full;
+      return { answer: partial, sources: partial ? buildSources(state.chunks || []) : [], tokens, aborted: true };
     }
     console.error('[RAG] ragQueryStream error:', e.message);
     const answer = `Lỗi hệ thống AI: ${e.message}`;
