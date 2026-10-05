@@ -74,6 +74,10 @@ app.use(morgan("combined"));
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
 // Health check
+app.get("/", (req, res) => {
+  res.json({ status: "ok", service: "TTTN Chatbot Backend", health: "/health" });
+});
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString(), service: "TTTN Chatbot Backend" });
 });
