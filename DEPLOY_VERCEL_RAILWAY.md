@@ -1,4 +1,6 @@
-# Deploy len Vercel + Railway
+# Legacy: Deploy Vercel + Railway
+
+Quy trình hiện tại dùng Render cho backend. Xem [DEPLOY_VERCEL_RENDER.md](DEPLOY_VERCEL_RENDER.md).
 
 Tai lieu nay huong dan deploy theo kieu:
 - Frontend (Vite/React) -> Vercel
