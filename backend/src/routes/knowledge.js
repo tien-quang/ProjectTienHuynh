@@ -148,24 +148,38 @@ router.post("/upload", authenticate, upload.single("file"), async (req, res) => 
 
       const fileExt = path.extname(req.file.originalname).toLowerCase().replace(".", "");
       const results = [];
+      const copies = [];
 
-      for (const dept of allDepts) {
-        const doc = await KnowledgeDocument.create({
-          name: (name || req.file.originalname),
-          originalName: req.file.originalname,
-          filePath: req.file.path,
-          fileType: fileExt,
-          fileSize: req.file.size,
-          department: dept._id,
-          uploadedBy: req.user._id,
-          tags: tags ? tags.split(",").map(t => t.trim()).filter(Boolean) : [],
-          description: description || "",
-          approvalStatus: "approved",
-          status: "pending",
-        });
-        results.push(doc);
-        triggerIndex(doc._id);
+      // Mỗi phòng ban một bản copy file riêng: xoá/reindex tài liệu ở phòng này
+      // không làm mất file gốc của các phòng khác.
+      try {
+        for (const dept of allDepts) {
+          const copyPath = path.join(UPLOAD_DIR, `${Date.now()}-${Math.round(Math.random() * 1e9)}.${fileExt}`);
+          fs.copyFileSync(req.file.path, copyPath);
+          copies.push(copyPath);
+          const doc = await KnowledgeDocument.create({
+            name: (name || req.file.originalname),
+            originalName: req.file.originalname,
+            filePath: copyPath,
+            fileType: fileExt,
+            fileSize: req.file.size,
+            department: dept._id,
+            uploadedBy: req.user._id,
+            tags: tags ? tags.split(",").map(t => t.trim()).filter(Boolean) : [],
+            description: description || "",
+            approvalStatus: "approved",
+            status: "pending",
+          });
+          results.push(doc);
+        }
+      } catch (e) {
+        // Lỗi giữa chừng: dọn các bản copy + document đã tạo để không để lại dữ liệu nửa vời
+        await KnowledgeDocument.deleteMany({ _id: { $in: results.map(d => d._id) } }).catch(() => {});
+        copies.forEach(f => fs.unlink(f, () => {}));
+        throw e;
       }
+      fs.unlink(req.file.path, () => {}); // bản gốc multer không còn doc nào trỏ tới
+      results.forEach(doc => triggerIndex(doc._id));
 
       AuditLog.create({
         actor: req.user._id, actorName: req.user.name, actorRole: req.user.role,
@@ -309,8 +323,10 @@ router.delete("/:id", authenticate, authorize("master_admin", "manager"), async 
     if (!doc) return res.status(404).json({ error: "Tài liệu không tồn tại" });
 
     await deleteDocument({ documentId: doc._id.toString(), departmentCode: doc.department?.code || "GENERAL" });
-    if (doc.filePath && fs.existsSync(doc.filePath)) fs.unlink(doc.filePath, () => {});
     await KnowledgeDocument.findByIdAndDelete(req.params.id);
+    // Dữ liệu cũ upload "ALL" có nhiều document dùng chung 1 file → chỉ xoá file khi không còn ai tham chiếu
+    const stillUsed = doc.filePath && await KnowledgeDocument.exists({ filePath: doc.filePath });
+    if (doc.filePath && !stillUsed && fs.existsSync(doc.filePath)) fs.unlink(doc.filePath, () => {});
 
     AuditLog.create({
       actor: req.user._id, actorName: req.user.name, actorRole: req.user.role,

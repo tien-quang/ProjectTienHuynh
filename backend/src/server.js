@@ -70,14 +70,12 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(morgan("combined"));
 
-// Static files
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+// Static files — CHỈ ảnh sản phẩm là công khai.
+// knowledge/ (tài liệu nội bộ), chat-temp/ (ảnh chat) và compare-temp/ KHÔNG được serve tĩnh;
+// ảnh chat đi qua GET /api/chat/images/:filename (có xác thực + kiểm tra chủ sở hữu).
+app.use("/uploads/products", express.static(path.join(__dirname, "../uploads/products")));
 
 // Health check
-app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "TTTN Chatbot Backend", health: "/health" });
-});
-
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString(), service: "TTTN Chatbot Backend" });
 });

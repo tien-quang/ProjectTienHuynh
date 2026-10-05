@@ -5,6 +5,10 @@ const fs = require("fs");
 const ChatSession = require("../models/ChatSession");
 const Department = require("../models/Department");
 const KnowledgeDocument = require("../models/KnowledgeDocument");
+const PendingUpload = require("../models/PendingUpload");
+const Notification = require("../models/Notification");
+const User = require("../models/User");
+const mongoose = require("mongoose");
 const AuditLog = require("../models/AuditLog");
 const { authenticate } = require("../middleware/auth");
 const { ragQuery, ragQueryStream, compareDocumentWithKnowledge, maybeSummarizeSession } = require("../services/ragService");
@@ -41,8 +45,41 @@ const uploadImage = multer({
   },
 });
 
+// File so sánh nằm thư mục riêng (không lẫn với ảnh chat vì ảnh chat được lưu vĩnh viễn trong lịch sử)
+const COMPARE_UPLOAD_DIR = path.join(__dirname, "../../uploads/compare-temp");
+fs.mkdirSync(COMPARE_UPLOAD_DIR, { recursive: true });
+const compareStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, COMPARE_UPLOAD_DIR),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`),
+});
+
+// Dọn file so sánh bị bỏ dở (PendingUpload đã hết hạn sau 1 giờ) — chạy mỗi 30 phút
+function sweepCompareTemp() {
+  fs.readdir(COMPARE_UPLOAD_DIR, (err, files) => {
+    if (err) return;
+    const now = Date.now();
+    files.forEach((f) => {
+      const p = path.join(COMPARE_UPLOAD_DIR, f);
+      fs.stat(p, (e, st) => { if (!e && st.isFile() && now - st.mtimeMs > 2 * 3600 * 1000) fs.unlink(p, () => {}); });
+    });
+  });
+}
+sweepCompareTemp();
+setInterval(sweepCompareTemp, 30 * 60 * 1000).unref();
+
+function moveFile(src, dest) {
+  try { fs.renameSync(src, dest); }
+  catch (e) { if (e.code !== "EXDEV") throw e; fs.copyFileSync(src, dest); fs.unlinkSync(src); }
+}
+
+// Cùng quy tắc với POST /api/knowledge/upload: employee chỉ thêm vào phòng ban của mình
+function canAddToDept(user, deptId) {
+  if (user.role !== "employee") return true;
+  return user.department?._id?.toString() === String(deptId);
+}
+
 const uploadCompareDoc = multer({
-  storage: chatStorage,
+  storage: compareStorage,
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ok = [".pdf", ".docx", ".txt", ".xlsx", ".csv", ".md"].includes(path.extname(file.originalname).toLowerCase());
@@ -196,52 +233,60 @@ router.post("/sessions/:id/message", authenticate, async (req, res) => {
 });
 
 // POST /api/chat/sessions/:id/message/stream — trả lời dạng streaming (SSE)
+// Sự kiện: {status} (đang hiểu/tra cứu/đọc/viết) · {delta} · {done, sources, userMessage, assistantMessage} · {error}
+// Client ngắt kết nối (nút Stop / đóng tab) → huỷ pipeline + request OpenAI để không tốn token vô ích.
 router.post("/sessions/:id/message/stream", authenticate, async (req, res) => {
-  try {
-    const { message } = req.body;
-    if (!message?.trim()) return res.status(400).json({ error: "Tin nhắn không được để trống" });
+  const text = req.body?.message?.trim();
+  if (!text) return res.status(400).json({ error: "Tin nhắn không được để trống" });
 
+  try {
     const session = await ChatSession.findOne({ _id: req.params.id, user: req.user._id }).populate("department");
     if (!session) return res.status(404).json({ error: "Session không tồn tại" });
 
     const dept = session.department;
     const isGlobalSession = session.isGlobal === true;
-    const userMsg = { role: "user", content: message.trim(), timestamp: new Date() };
-    session.messages.push(userMsg);
+    session.messages.push({ role: "user", content: text, timestamp: new Date() });
 
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no"); // tắt buffer của nginx/proxy
     res.flushHeaders?.();
 
-    let full = "";
+    const ac = new AbortController();
+    res.on("close", () => { if (!res.writableEnded) ac.abort(); });
+    const send = (obj) => { if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(obj)}\n\n`); };
+
     let result;
     try {
       result = await ragQueryStream({
-        question: message.trim(),
+        question: text,
         departmentCode: isGlobalSession ? "ALL" : dept.code,
         departmentName: isGlobalSession ? "Toàn hệ thống" : dept.name,
         systemPrompt: dept.aiSystemPrompt,
         history: buildHistory(session),
         conversationSummary: session.summary || "",
         isMasterAdmin: isGlobalSession,
-        onDelta: (delta) => {
-          full += delta;
-          res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-        },
+        signal: ac.signal,
+        onStatus: (status) => send({ status }),
+        onDelta: (delta) => send({ delta }),
       });
     } catch (e) {
-      result = { answer: full || `Lỗi hệ thống AI: ${e.message}`, sources: [], tokens: 0 };
+      result = { answer: `Lỗi hệ thống AI: ${e.message}`, sources: [], tokens: 0, aborted: ac.signal.aborted };
     }
 
-    const assistantMsg = { role: "assistant", content: result.answer, sources: result.sources || [], tokens: result.tokens || 0, timestamp: new Date() };
-    session.messages.push(assistantMsg);
+    // Người dùng bấm Stop trước khi có chữ nào → không lưu gì (câu hỏi cũng không lưu, client sẽ trả lại vào ô nhập)
+    if (result.aborted && !(result.answer || "").trim()) return;
+
+    session.messages.push({ role: "assistant", content: result.answer, sources: result.sources || [], tokens: result.tokens || 0, timestamp: new Date() });
     session.totalTokens = (session.totalTokens || 0) + (result.tokens || 0);
     session.lastMessageAt = new Date();
-    if (session.messages.length === 2) session.title = message.trim().substring(0, 60) + (message.length > 60 ? "..." : "");
+    if (session.messages.length === 2) session.title = text.substring(0, 60) + (text.length > 60 ? "..." : "");
     await session.save();
 
-    res.write(`data: ${JSON.stringify({ done: true, sources: result.sources || [] })}\n\n`);
+    const [savedUser, savedAssistant] = session.messages.slice(-2);
+    send({ done: true, sources: result.sources || [], userMessage: savedUser, assistantMessage: savedAssistant });
     res.end();
 
     maybeSummarizeSession(session).then(async (r) => {
@@ -250,7 +295,7 @@ router.post("/sessions/:id/message/stream", authenticate, async (req, res) => {
   } catch (err) {
     console.error(err);
     if (!res.headersSent) res.status(500).json({ error: "Lỗi server" });
-    else { res.write(`data: ${JSON.stringify({ error: "Lỗi server" })}\n\n`); res.end(); }
+    else if (!res.writableEnded) { res.write(`data: ${JSON.stringify({ error: "Lỗi server" })}\n\n`); res.end(); }
   }
 });
 
@@ -304,16 +349,28 @@ router.post("/sessions/:id/message-image", authenticate, uploadImage.single("ima
 // POST /api/chat/sessions/:id/compare-document — đính kèm 1 tài liệu để so sánh với kho tri thức
 router.post("/sessions/:id/compare-document", authenticate, uploadCompareDoc.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Vui lòng chọn file" });
+  const cleanup = () => fs.unlink(req.file.path, () => {});
   try {
     const session = await ChatSession.findOne({ _id: req.params.id, user: req.user._id }).populate("department");
-    if (!session) { fs.unlink(req.file.path, () => {}); return res.status(404).json({ error: "Session không tồn tại" }); }
+    if (!session) { cleanup(); return res.status(404).json({ error: "Session không tồn tại" }); }
 
-    const dept = session.department;
+    // Phòng ban đích do SERVER xác định (không tin giá trị client gửi lên khi lưu)
+    let targetDept = session.department;
+    if (session.isGlobal) {
+      const code = String(req.body.departmentCode || "").trim().toUpperCase();
+      if (code) {
+        targetDept = await Department.findOne({ code, isActive: true });
+        if (!targetDept) { cleanup(); return res.status(404).json({ error: "Phòng ban không tồn tại" }); }
+      }
+    }
+    if (!canAddToDept(req.user, targetDept._id)) {
+      cleanup();
+      return res.status(403).json({ error: "Bạn chỉ có thể thêm tài liệu vào phòng ban của mình" });
+    }
+
     const fileType = path.extname(req.file.originalname).toLowerCase().replace(".", "");
-    const deptCode = session.isGlobal ? (req.body.departmentCode || dept.code) : dept.code;
-
     const compareResult = await compareDocumentWithKnowledge({
-      filePath: req.file.path, fileType, fileName: req.body.name || req.file.originalname, departmentCode: deptCode,
+      filePath: req.file.path, fileType, fileName: req.body.name || req.file.originalname, departmentCode: targetDept.code,
     });
 
     const verdictLabel = {
@@ -343,15 +400,20 @@ router.post("/sessions/:id/compare-document", authenticate, uploadCompareDoc.sin
     session.lastMessageAt = new Date();
     await session.save();
 
+    // Client chỉ nhận pendingId — mọi thông tin còn lại (đường dẫn, phòng ban, loại file) nằm ở server
+    const pending = await PendingUpload.create({
+      user: req.user._id, session: session._id, department: targetDept._id,
+      tempPath: req.file.path, originalName: req.file.originalname, fileType,
+    });
+
     res.json({
       assistantMessage: assistantMsg,
       compareResult,
-      // Frontend giữ lại 3 field này để gọi /compare-document/confirm nếu người dùng đồng ý thêm/thay thế
-      pendingFile: { tempPath: req.file.path, originalName: req.file.originalname, fileType, departmentId: dept._id.toString() },
+      pendingFile: { pendingId: pending._id.toString() },
     });
   } catch (err) {
     console.error(err);
-    if (req.file?.path) fs.unlink(req.file.path, () => {});
+    cleanup();
     res.status(500).json({ error: err.message || "So sánh thất bại" });
   }
 });
@@ -359,36 +421,83 @@ router.post("/sessions/:id/compare-document", authenticate, uploadCompareDoc.sin
 // POST /api/chat/sessions/:id/compare-document/confirm — xác nhận thêm mới / thay thế tài liệu cũ
 router.post("/sessions/:id/compare-document/confirm", authenticate, async (req, res) => {
   try {
-    const { tempPath, originalName, fileType, departmentId, action, name } = req.body; // action: "add" | "discard"
-    if (!tempPath || !fs.existsSync(tempPath)) return res.status(400).json({ error: "File tạm không còn tồn tại, vui lòng upload lại" });
-
-    if (action === "discard") {
-      fs.unlink(tempPath, () => {});
-      return res.json({ message: "Đã huỷ, không thêm tài liệu này vào kho tri thức" });
+    const { pendingId, action, name } = req.body; // action: "add" | "discard"
+    if (!["add", "discard"].includes(action)) return res.status(400).json({ error: "action không hợp lệ" });
+    if (!mongoose.isValidObjectId(pendingId) || !mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Yêu cầu không hợp lệ" });
     }
 
-    // Chuyển file từ thư mục tạm sang thư mục knowledge chính thức, rồi chạy qua đúng pipeline
-    // index chính thức (idxVersionCheck trong ragService sẽ tự phát hiện lại supersede/duplicate
-    // và archive tài liệu cũ nếu action là "update" — không cần xử lý thủ công ở đây).
-    const finalPath = path.join(knowledgeRoutes.UPLOAD_DIR, path.basename(tempPath));
-    fs.renameSync(tempPath, finalPath);
+    // findOneAndDelete = "nhận" bản ghi một lần duy nhất (chống bấm xác nhận 2 lần) và chỉ chủ sở hữu mới nhận được
+    const pending = await PendingUpload.findOneAndDelete({ _id: pendingId, user: req.user._id, session: req.params.id });
+    if (!pending) return res.status(400).json({ error: "Yêu cầu đã hết hạn hoặc đã xử lý, vui lòng upload lại" });
 
+    const discard = () => fs.unlink(pending.tempPath, () => {});
+    if (action === "discard") { discard(); return res.json({ message: "Đã huỷ, không thêm tài liệu này vào kho tri thức" }); }
+
+    if (!canAddToDept(req.user, pending.department)) { discard(); return res.status(403).json({ error: "Bạn không có quyền thêm tài liệu vào phòng ban này" }); }
+    const dept = await Department.findById(pending.department);
+    if (!dept || !fs.existsSync(pending.tempPath)) { discard(); return res.status(400).json({ error: "File tạm không còn tồn tại, vui lòng upload lại" }); }
+
+    // Chuyển sang thư mục knowledge chính thức rồi chạy qua pipeline index chính thức
+    // (idxVersionCheck sẽ tự phát hiện supersede/duplicate khi tài liệu được index).
+    const finalPath = path.join(knowledgeRoutes.UPLOAD_DIR, path.basename(pending.tempPath));
+    moveFile(pending.tempPath, finalPath);
+
+    // Giống /knowledge/upload: manager/admin được duyệt sẵn, employee phải chờ duyệt
+    const isManagerOrAdmin = req.user.role !== "employee";
+    const docName = String(name || pending.originalName).trim().slice(0, 200) || pending.originalName;
     const doc = await KnowledgeDocument.create({
-      name: name || originalName,
-      originalName,
+      name: docName,
+      originalName: pending.originalName,
       filePath: finalPath,
-      fileType,
+      fileType: pending.fileType,
       fileSize: fs.statSync(finalPath).size,
-      department: departmentId,
+      department: dept._id,
       uploadedBy: req.user._id,
-      approvalStatus: "approved",
+      approvalStatus: isManagerOrAdmin ? "approved" : "pending_approval",
       status: "pending",
     });
 
-    res.json({ message: "Đã thêm vào kho tri thức, đang index...", documentId: doc._id });
-    knowledgeRoutes.triggerIndex(doc._id);
+    res.json({
+      message: isManagerOrAdmin ? "Đã thêm vào kho tri thức, đang index..." : "Đã gửi tài liệu, đang chờ quản lý duyệt",
+      documentId: doc._id,
+      approvalStatus: doc.approvalStatus,
+    });
+
+    if (isManagerOrAdmin) {
+      knowledgeRoutes.triggerIndex(doc._id);
+    } else {
+      const managers = await User.find({ department: dept._id, role: { $in: ["manager", "master_admin"] }, isActive: true });
+      if (managers.length) {
+        await Notification.insertMany(managers.map(m => ({
+          recipient: m._id, type: "new_document", title: "Tài liệu chờ duyệt",
+          message: `${req.user.name} đã upload "${doc.name}" và đang chờ bạn duyệt`,
+        }))).catch(() => {});
+      }
+    }
+    AuditLog.create({
+      actor: req.user._id, actorName: req.user.name, actorRole: req.user.role,
+      action: "DOCUMENT_UPLOAD", targetType: "Document", targetId: doc._id, targetName: doc.name,
+      details: { via: "chat-compare" }, ipAddress: req.ip,
+    }).catch(() => {});
   } catch (err) {
     console.error(err);
+    if (!res.headersSent) res.status(500).json({ error: "Lỗi server" });
+  }
+});
+
+// GET /api/chat/images/:filename — ảnh đính kèm trong chat (thay cho static /uploads/chat-temp).
+// Chỉ chủ của cuộc hội thoại chứa ảnh đó mới xem được.
+router.get("/images/:filename", authenticate, async (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    if (!/^[\w.-]+$/.test(filename)) return res.status(400).json({ error: "Tên file không hợp lệ" });
+    const owned = await ChatSession.exists({ user: req.user._id, "messages.imageUrl": `/uploads/chat-temp/${filename}` });
+    const full = path.join(CHAT_UPLOAD_DIR, filename);
+    if (!owned || !fs.existsSync(full)) return res.status(404).json({ error: "Không tìm thấy ảnh" });
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.sendFile(full);
+  } catch (err) {
     res.status(500).json({ error: "Lỗi server" });
   }
 });

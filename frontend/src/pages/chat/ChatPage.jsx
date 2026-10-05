@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Send, Plus, Trash2, Download, Star, MessageSquare,
   Bot, User, Copy, AlertCircle, PanelLeft, Sparkles,
-  ImagePlus, FileSearch2, X, Check
+  ImagePlus, FileSearch2, X, Check, Square
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -11,7 +11,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { vi } from 'date-fns/locale'
 import toast from 'react-hot-toast'
 import api from '../../services/api'
-import { BACKEND_URL } from '../../services/config'
+import { streamMessage } from '../../services/stream'
 import { useAuth } from '../../context/AuthContext'
 import clsx from 'clsx'
 
@@ -23,6 +23,31 @@ function TypingDots() {
       {[0,1,2].map(i => <div key={i} className="typing-dot w-2 h-2 bg-slate-500 rounded-full" />)}
     </div>
   )
+}
+
+const STATUS_LABEL = {
+  understanding: 'Đang hiểu câu hỏi...',
+  searching: 'Đang tra cứu tài liệu...',
+  reading: 'Đang đọc nội dung liên quan...',
+  writing: 'Đang soạn câu trả lời...',
+}
+
+// Ảnh chat không còn public → tải qua API có token rồi hiển thị bằng blob URL
+function AuthImage({ url, ...props }) {
+  const [src, setSrc] = useState(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    let objUrl = null
+    setSrc(null); setFailed(false)
+    api.get(`/chat/images/${encodeURIComponent(url.split('/').pop())}`, { responseType: 'blob' })
+      .then(r => { if (!cancelled) { objUrl = URL.createObjectURL(r.data); setSrc(objUrl) } })
+      .catch(() => { if (!cancelled) setFailed(true) })
+    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl) }
+  }, [url])
+  if (failed) return <div className="rounded-xl mb-2 px-3 py-2 text-xs text-slate-400 bg-slate-700/40">Không tải được ảnh</div>
+  if (!src) return <div className="rounded-xl mb-2 w-[160px] h-[100px] bg-slate-700/40 animate-pulse" />
+  return <img src={src} {...props} />
 }
 
 function Bubble({ msg }) {
@@ -42,7 +67,7 @@ function Bubble({ msg }) {
             : 'bg-slate-800 border border-slate-700 text-slate-100 rounded-2xl rounded-tl-sm'
         )}>
           {msg.imageUrl && (
-            <img src={`${BACKEND_URL}${msg.imageUrl}`} alt="Ảnh đính kèm"
+            <AuthImage url={msg.imageUrl} alt="Ảnh đính kèm"
               className="rounded-xl mb-2 max-w-[220px] max-h-[220px] object-cover border border-white/10" />
           )}
           {isUser
@@ -90,7 +115,9 @@ export default function ChatPage() {
   const compareInputRef = useRef(null)
   const [sendingImage, setSendingImage] = useState(false)
   const [comparing, setComparing] = useState(false)
-  const [pendingCompare, setPendingCompare] = useState(null) // { pendingFile, compareResult }
+  const [pendingCompare, setPendingCompare] = useState(null) // { pendingFile: { pendingId }, compareResult }
+  const [streamStatus, setStreamStatus] = useState('')
+  const abortRef = useRef(null)
 
   const isMasterAdmin = user?.role === 'master_admin'
   const userDeptId = user?.department?._id
@@ -137,21 +164,70 @@ export default function ChatPage() {
     } catch { toast.error('Xóa thất bại') }
   }
 
+  const stopStreaming = () => abortRef.current?.abort()
+
   const sendMessage = async () => {
     if (!input.trim() || !sessionId || sending) return
     const text = input.trim()
     setInput('')
     setSending(true)
-    const tmpId = `tmp_${Date.now()}`
-    setMessages(prev => [...prev, { role: 'user', content: text, timestamp: new Date().toISOString(), _id: tmpId }])
+    setStreamStatus('understanding')
+
+    const stamp = Date.now()
+    const userTmpId = `tmp_u_${stamp}`
+    const aiTmpId = `tmp_a_${stamp}`
+    setMessages(prev => [...prev, { role: 'user', content: text, timestamp: new Date().toISOString(), _id: userTmpId }])
+
+    const ac = new AbortController()
+    abortRef.current = ac
+
+    // Gom delta và cập nhật tối đa 1 lần/frame để ReactMarkdown không re-render theo từng token
+    let acc = ''
+    let raf = 0
+    const paint = () => {
+      raf = 0
+      setMessages(prev => prev.some(m => m._id === aiTmpId)
+        ? prev.map(m => m._id === aiTmpId ? { ...m, content: acc } : m)
+        : [...prev, { role: 'assistant', content: acc, sources: [], timestamp: new Date().toISOString(), _id: aiTmpId }])
+    }
+    const flush = () => { if (raf) cancelAnimationFrame(raf); paint() }
+
     try {
-      const { data } = await api.post(`/chat/sessions/${sessionId}/message`, { message: text })
-      setMessages(prev => [...prev.filter(m => m._id !== tmpId), data.userMessage, data.assistantMessage])
+      const done = await streamMessage(sessionId, text, {
+        signal: ac.signal,
+        onStatus: setStreamStatus,
+        onDelta: (d) => { acc += d; if (!raf) raf = requestAnimationFrame(paint) },
+      })
+      if (raf) cancelAnimationFrame(raf)
+      setMessages(prev => [
+        ...prev.filter(m => m._id !== userTmpId && m._id !== aiTmpId),
+        done.userMessage,
+        done.assistantMessage,
+      ])
       setSessions(prev => prev.map(s => s._id === sessionId ? { ...s, lastMessageAt: new Date().toISOString() } : s))
     } catch (err) {
-      setMessages(prev => prev.filter(m => m._id !== tmpId))
-      toast.error(err.response?.data?.error || 'Gửi thất bại. Vui lòng thử lại.')
-    } finally { setSending(false); textareaRef.current?.focus() }
+      if (err.name === 'AbortError') {
+        if (acc) {
+          // Server đã lưu phần trả lời dở dang → giữ lại trên màn hình
+          flush()
+        } else {
+          // Chưa có chữ nào: server không lưu gì → bỏ câu hỏi tạm và trả lại vào ô nhập
+          if (raf) cancelAnimationFrame(raf)
+          setMessages(prev => prev.filter(m => m._id !== userTmpId && m._id !== aiTmpId))
+          setInput(text)
+        }
+      } else {
+        if (raf) cancelAnimationFrame(raf)
+        setMessages(prev => prev.filter(m => m._id !== userTmpId && m._id !== aiTmpId))
+        setInput(text)
+        toast.error(err.message || 'Gửi thất bại. Vui lòng thử lại.')
+      }
+    } finally {
+      abortRef.current = null
+      setSending(false)
+      setStreamStatus('')
+      textareaRef.current?.focus()
+    }
   }
 
   const handleKeyDown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }
@@ -193,10 +269,10 @@ export default function ChatPage() {
   const confirmCompare = async (action) => {
     if (!pendingCompare) return
     try {
-      await api.post(`/chat/sessions/${sessionId}/compare-document/confirm`, {
+      const { data } = await api.post(`/chat/sessions/${sessionId}/compare-document/confirm`, {
         ...pendingCompare.pendingFile, action,
       })
-      toast.success(action === 'discard' ? 'Đã bỏ qua' : 'Đã thêm vào kho tri thức, đang index...')
+      toast.success(action === 'discard' ? 'Đã bỏ qua' : (data.message || 'Đã thêm vào kho tri thức'))
     } catch (err) {
       toast.error(err.response?.data?.error || 'Thao tác thất bại')
     } finally { setPendingCompare(null) }
@@ -408,13 +484,14 @@ export default function ChatPage() {
 
           {messages.map((msg, i) => <Bubble key={msg._id || i} msg={msg} />)}
 
-          {sending && (
+          {sending && !messages.some(m => String(m._id).startsWith('tmp_a_')) && (
             <div className="flex gap-3 chat-ai">
               <div className="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center flex-shrink-0">
                 <Bot size={13} className="text-slate-300" />
               </div>
-              <div className="bg-slate-800 border border-slate-700 rounded-2xl rounded-tl-sm px-4">
+              <div className="bg-slate-800 border border-slate-700 rounded-2xl rounded-tl-sm px-4 flex items-center gap-2">
                 <TypingDots />
+                {STATUS_LABEL[streamStatus] && <span className="text-xs text-slate-400 pr-1">{STATUS_LABEL[streamStatus]}</span>}
               </div>
             </div>
           )}
@@ -472,16 +549,23 @@ export default function ChatPage() {
                   className="w-full bg-transparent text-slate-100 placeholder-slate-500 resize-none outline-none text-sm leading-relaxed max-h-32"
                 />
               </div>
-              <button
-                onClick={sendMessage}
-                disabled={!input.trim() || sending}
-                className={clsx('p-3 rounded-2xl transition-all flex-shrink-0',
-                  input.trim() && !sending
-                    ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/30 active:scale-95'
-                    : 'bg-slate-800 text-slate-600 cursor-not-allowed'
-                )}>
-                <Send size={17} />
-              </button>
+              {sending ? (
+                <button onClick={stopStreaming} title="Dừng"
+                  className="p-3 rounded-2xl transition-all flex-shrink-0 bg-slate-700 hover:bg-slate-600 text-white active:scale-95">
+                  <Square size={17} />
+                </button>
+              ) : (
+                <button
+                  onClick={sendMessage}
+                  disabled={!input.trim()}
+                  className={clsx('p-3 rounded-2xl transition-all flex-shrink-0',
+                    input.trim()
+                      ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/30 active:scale-95'
+                      : 'bg-slate-800 text-slate-600 cursor-not-allowed'
+                  )}>
+                  <Send size={17} />
+                </button>
+              )}
             </div>
             <p className="text-xs text-slate-700 mt-2 text-center">AI có thể nhầm. Kiểm tra thông tin quan trọng trước khi dùng.</p>
           </div>

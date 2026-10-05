@@ -901,7 +901,13 @@ async function ragQuery({ question, departmentCode, departmentName, systemPrompt
 
 // Chạy lại thủ công (không qua StateGraph.invoke) để có thể stream phần generate cuối.
 // Vẫn tái sử dụng đúng các node/logic (memory, router, agent, rerank, self-critique).
-async function ragQueryStream({ question, departmentCode, departmentName, systemPrompt, history, conversationSummary, isMasterAdmin = false, onDelta }) {
+//  - onStatus(stage): 'understanding' | 'searching' | 'reading' | 'writing' — để UI hiện tiến trình
+//  - signal: AbortSignal — client ngắt kết nối thì dừng giữa các bước và huỷ luôn request OpenAI
+//  - trả về { aborted: true, answer: <phần đã viết> } khi bị huỷ
+async function ragQueryStream({ question, departmentCode, departmentName, systemPrompt, history, conversationSummary, isMasterAdmin = false, onDelta, onStatus, signal }) {
+  const status = (s) => { try { onStatus?.(s); } catch { /* UI callback lỗi không được làm hỏng pipeline */ } };
+  const guard = () => { if (signal?.aborted) { const e = new Error('aborted'); e.aborted = true; throw e; } };
+
   let state = {
     question,
     deptCode: isMasterAdmin ? 'ALL' : (departmentCode || ''),
@@ -915,28 +921,42 @@ async function ragQueryStream({ question, departmentCode, departmentName, system
     focusDocIds: [],
     needFullDoc: false,
   };
+  let full = '';
+  let tokens = 0;
 
   try {
+    guard();
+    status('understanding');
     state = { ...state, ...(await nodeMemory(state)) };
+    guard();
 
     if (state.intent === 'chitchat') {
+      status('writing');
       const r = await nodeChitchat(state);
+      guard();
       if (onDelta) onDelta(r.answer);
       return r;
     }
 
     for (let attempt = 0; attempt <= MAX_SELF_CRITIQUE_RETRY; attempt++) {
+      status('searching');
       state = { ...state, ...(await nodeRouter(state)) };
+      guard();
       const agentFn = { doc: nodeDocAgent, product: nodeProductAgent, both: nodeBothAgent }[state.queryType] || nodeDocAgent;
       state = { ...state, ...(await agentFn(state)) };
+      guard();
+      status('reading');
       state = { ...state, ...(await nodeRerank(state)) };
       state = { ...state, ...(await nodeExpand(state)) };
+      guard();
       state = { ...state, ...(await nodeSelfCritique(state)) };
+      guard();
       if (state.clarify || state.hasCtx) break;
     }
 
     if (state.clarify) {
       const r = await nodeAskClarify(state);
+      guard();
       if (onDelta) onDelta(r.answer);
       return r;
     }
@@ -946,18 +966,24 @@ async function ragQueryStream({ question, departmentCode, departmentName, system
       return { answer, sources: [], tokens: 0 };
     }
 
+    status('writing');
     const messages = buildGenerateMessages(state);
-    const stream = await getOpenAI().chat.completions.create({
-      model: CHAT_MODEL, messages, temperature: 0.15, max_tokens: 1200, stream: true,
-    });
+    const stream = await getOpenAI().chat.completions.create(
+      { model: CHAT_MODEL, messages, temperature: 0.15, max_tokens: 1200, stream: true, stream_options: { include_usage: true } },
+      { signal },
+    );
 
-    let full = '';
     for await (const part of stream) {
+      if (part.usage?.total_tokens) tokens = part.usage.total_tokens;
       const delta = part.choices?.[0]?.delta?.content || '';
       if (delta) { full += delta; if (onDelta) onDelta(delta); }
     }
-    return { answer: full, sources: buildSources(state.chunks), tokens: 0 };
+    return { answer: full, sources: buildSources(state.chunks), tokens };
   } catch (e) {
+    if (e.aborted || signal?.aborted || e.name === 'APIUserAbortError') {
+      console.log(`[RAG] stream bị huỷ bởi client (đã viết ${full.length} ký tự)`);
+      return { answer: full, sources: full ? buildSources(state.chunks || []) : [], tokens, aborted: true };
+    }
     console.error('[RAG] ragQueryStream error:', e.message);
     const answer = `Lỗi hệ thống AI: ${e.message}`;
     if (onDelta) onDelta(answer);
