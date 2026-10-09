@@ -1,4 +1,4 @@
-# 🤖 TTTN Chatbot Nội Bộ
+#  TTTN Chatbot Nội Bộ
 
 Hệ thống chatbot AI dành cho nhân viên nội bộ: hỏi đáp tài liệu (RAG), tra cứu sản phẩm và quản lý theo phòng ban.
 
@@ -30,7 +30,7 @@ Hệ thống chatbot AI dành cho nhân viên nội bộ: hỏi đáp tài liệ
 
 ---
 
-## 📌 Tổng quan
+##  Tổng quan
 
 Dự án gồm 3 thành phần chạy độc lập:
 
@@ -53,7 +53,7 @@ Dự án gồm 3 thành phần chạy độc lập:
 
 ```mermaid
 flowchart LR
-    U[👤 User] --> FE[React Frontend]
+    U[ User] --> FE[React Frontend]
     FE -->|Auth / CRUD| BE[Express Backend]
     FE -->|RAG / Chat| AI[FastAPI AI Service]
     BE --> DB[(MongoDB Atlas)]
@@ -63,7 +63,7 @@ flowchart LR
 
 ---
 
-## 📁 Cấu trúc dự án
+##  Cấu trúc dự án
 
 ```text
 TTTNCHATBOT/
@@ -137,7 +137,7 @@ TTTNCHATBOT/
 
 ---
 
-## ⚙️ Yêu cầu hệ thống
+##  Yêu cầu hệ thống
 
 | Thành phần | Phiên bản / Yêu cầu |
 |---|---|
@@ -149,7 +149,7 @@ TTTNCHATBOT/
 
 ---
 
-## 🚀 Cài đặt và chạy
+##  Cài đặt và chạy
 
 ### Bước 1 — Tạo file `.env` cho Backend
 
@@ -167,7 +167,7 @@ NODE_ENV=development
 PORT=5000
 ```
 
-> 💡 Thay `MONGODB_URI` bằng connection string thật từ MongoDB Atlas.
+>  Thay `MONGODB_URI` bằng connection string thật từ MongoDB Atlas.
 
 <details>
 <summary><b>Tạo nhanh bằng PowerShell (Windows)</b></summary>
@@ -216,7 +216,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-> ⚠️ AI Service cần OpenAI API key mới hoạt động. Nếu chưa có, chatbot vẫn chạy nhưng không trả lời.
+>  AI Service cần OpenAI API key mới hoạt động. Nếu chưa có, chatbot vẫn chạy nhưng không trả lời.
 
 ---
 
@@ -241,7 +241,7 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 
 ---
 
-## 🔑 Tài khoản mặc định
+##  Tài khoản mặc định
 
 Được tạo tự động khi backend khởi động lần đầu:
 
@@ -253,60 +253,60 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 | Sales Manager | `sales.manager@tttn.vn` | `Manager@123` |
 | Nhân viên | `an.nguyen@tttn.vn` | `Emp@123` |
 
-> 📝 Seed data chỉ chạy khi database **rỗng**. Muốn reset: xoá collection trong Atlas rồi restart backend.
+>  Seed data chỉ chạy khi database **rỗng**. Muốn reset: xoá collection trong Atlas rồi restart backend.
 >
-> 🔒 Đây là tài khoản demo. Hãy đổi mật khẩu nếu deploy thật.
+>  Đây là tài khoản demo. Hãy đổi mật khẩu nếu deploy thật.
 
 ---
 
-## ✨ Tính năng
+##  Tính năng
 
-### 🔐 Đăng ký / Đăng nhập
+###  Đăng ký / Đăng nhập
 - Trang đăng ký tại `/register`, tạo tài khoản role `employee`; admin phân phòng ban sau.
 - JWT access token (15 phút) + refresh token (7 ngày), tự động rotate.
 - Token lưu trong `localStorage` qua Zustand persist.
 
-### 💬 Chat AI
+###  Chat AI
 - Tạo session theo phòng ban, lịch sử hiển thị ở sidebar trái.
 - Hỗ trợ Markdown trong phản hồi (bảng, code, danh sách...).
 - Typing indicator khi AI đang xử lý.
 - Đánh giá cuộc hội thoại (1–5 sao).
 - Export chat ra file `.txt`, xoá session.
 
-### 📚 Tài liệu nội bộ
+###  Tài liệu nội bộ
 - Upload: PDF, DOCX, TXT, XLSX, CSV, MD (tối đa 50MB), hỗ trợ kéo thả.
 - Master Admin chọn phòng ban khi upload; Manager tự upload vào phòng ban của mình.
 - Tự động cập nhật trạng thái index mỗi 5 giây.
 - Xem theo phòng ban, lọc theo trạng thái.
 
-### 🛒 Sản phẩm
+###  Sản phẩm
 - Thêm / sửa / xoá sản phẩm, upload ảnh (JPG, PNG, WEBP, tối đa 5MB).
 - Danh mục: Laptop, RAM, SSD, CPU, GPU, Màn hình, Linh kiện, Phụ kiện...
 - Thông số kỹ thuật dạng JSON.
 - Tìm kiếm, lọc theo danh mục, phân trang.
 
-### 👥 Quản lý người dùng (Manager / Admin)
+###  Quản lý người dùng (Manager / Admin)
 - Tạo, sửa, xoá tài khoản.
 - Phân quyền: `employee` / `manager` / `master_admin`.
 - Phân phòng ban, reset mật khẩu.
 
-### 🏢 Phòng ban (Master Admin)
+###  Phòng ban (Master Admin)
 - Cấu hình mô tả, màu sắc.
 - Tin nhắn chào khi bắt đầu chat.
 - System prompt AI riêng cho từng phòng ban.
 
-### 📋 Audit Log (Master Admin)
+###  Audit Log (Master Admin)
 - Ghi lại mọi hành động: đăng nhập, tạo/xoá user, upload tài liệu...
 - Xem chi tiết từng log, lọc theo loại hành động.
 
 ---
 
-## 📡 API Reference
+##  API Reference
 
 **Base URL:** `http://localhost:5000/api`
 
 <details>
-<summary><b>🔐 Auth</b></summary>
+<summary><b> Auth</b></summary>
 
 | Method | Endpoint | Mô tả |
 |---|---|---|
@@ -319,7 +319,7 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 </details>
 
 <details>
-<summary><b>👥 Users</b></summary>
+<summary><b> Users</b></summary>
 
 | Method | Endpoint | Mô tả |
 |---|---|---|
@@ -332,7 +332,7 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 </details>
 
 <details>
-<summary><b>💬 Chat</b></summary>
+<summary><b> Chat</b></summary>
 
 | Method | Endpoint | Mô tả |
 |---|---|---|
@@ -347,7 +347,7 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 </details>
 
 <details>
-<summary><b>📚 Knowledge</b></summary>
+<summary><b> Knowledge</b></summary>
 
 | Method | Endpoint | Mô tả |
 |---|---|---|
@@ -359,7 +359,7 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 </details>
 
 <details>
-<summary><b>🛒 Products</b></summary>
+<summary><b> Products</b></summary>
 
 | Method | Endpoint | Mô tả |
 |---|---|---|
@@ -371,7 +371,7 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 </details>
 
 <details>
-<summary><b>🏢 Departments · 📊 Admin · 📋 Audit · 🔔 Notifications</b></summary>
+<summary><b> Departments · Admin ·  Audit ·  Notifications</b></summary>
 
 | Method | Endpoint | Mô tả |
 |---|---|---|
@@ -388,37 +388,37 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 
 ## 🛠 Lỗi thường gặp & cách fix
 
-### ❌ `MongoDB connection error: querySrv ENOTFOUND`
+###  `MongoDB connection error: querySrv ENOTFOUND`
 - **Nguyên nhân:** File `.env` chưa được tạo hoặc bị lỗi encoding.
 - **Fix:** chạy trong thư mục `backend/`:
   ```powershell
   "MONGODB_URI=mongodb+srv://..." | Set-Content .env -Encoding utf8
   ```
 
-### ❌ `Cannot find module './store/authStore'`
+###  `Cannot find module './store/authStore'`
 - **Nguyên nhân:** Thiếu file `src/store/authStore.js`.
 - **Fix:** File này có sẵn trong project, hãy đảm bảo giải nén đúng thư mục.
 
-### ❌ Vite lỗi import path
+### Vite lỗi import path
 - **Nguyên nhân:** Có thể xuất hiện folder tên `{auth,chat,...}` do lỗi brace expansion của `mkdir` trên Linux.
 - **Fix:** Xoá các folder tên lạ đó, chúng chỉ là artifact lỗi.
 
-### ❌ Đăng ký không hoạt động
+### Đăng ký không hoạt động
 - **Nguyên nhân:** Backend chưa có route `/auth/register`.
 - **Fix:** Route đã được thêm trong `backend/src/routes/auth.js`.
 
-### ❌ Upload ảnh sản phẩm không hoạt động
+###  Upload ảnh sản phẩm không hoạt động
 - **Nguyên nhân:** Route `/products` cần hỗ trợ `multipart/form-data` với field `image`.
 - **Kiểm tra:** `backend/src/routes/products.js` phải dùng middleware `multer`.
 
-### ❌ Không hiện dropdown chọn phòng ban khi upload tài liệu
+### Không hiện dropdown chọn phòng ban khi upload tài liệu
 - **Nguyên nhân:** Logic cũ chỉ hiện dropdown với `master_admin` và không fetch departments trước.
 - **Fix:** Đã sửa, dropdown hiện với `master_admin` và user chưa có phòng ban; departments được fetch khi mở trang.
 
-### ❌ Frontend chạy ở port 3000 thay vì 5173
+### Frontend chạy ở port 3000 thay vì 5173
 - Vite mặc định dùng **5173**. Nếu thấy 3000 nghĩa là bạn đã config custom trong `vite.config.js`.
 
-### ❌ CORS error khi frontend gọi API
+###  CORS error khi frontend gọi API
 - **Fix:** `backend/src/server.js` phải có:
   ```js
   app.use(cors({ origin: ['http://localhost:5173', 'http://localhost:3000'] }))
@@ -426,7 +426,7 @@ Vào **Network Access** → **Add IP Address** → chọn **Allow Access from An
 
 ---
 
-## 🐳 Deploy với Docker
+##  Deploy với Docker
 
 Tạo file `.env` ở thư mục gốc, sau đó chạy:
 
@@ -437,7 +437,7 @@ docker-compose up --build
 
 ---
 
-## 📝 Ghi chú kỹ thuật
+##  Ghi chú kỹ thuật
 
 - **Auth system:** Dùng Zustand (`store/authStore.js`) làm single source of truth. `AuthContext` wrap lại Zustand để các component vẫn dùng `useAuth()` bình thường.
 - **Token storage:** Access token & refresh token lưu trong `localStorage` key `tttn-auth` (Zustand persist). Axios interceptor tự đọc và tự refresh khi nhận 401.
