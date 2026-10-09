@@ -2,7 +2,7 @@
 
 Hệ thống chatbot AI dành cho nhân viên nội bộ: hỏi đáp tài liệu (RAG), tra cứu sản phẩm và quản lý theo phòng ban.
 
-🔗 **Live Demo:** [https://chatbotrag-taupe.vercel.app](https://chatbotrag-taupe.vercel.app)
+🔗 **Live Demo:** im not share . if you want use that . Set up and run . its very easy 
 
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)
