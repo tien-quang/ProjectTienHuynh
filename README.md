@@ -1,26 +1,44 @@
-# TTTN Chatbot Nội Bộ
-Live Demo:** https://chatbotrag-taupe.vercel.app
-Hệ thống chatbot AI dành cho nhân viên nội bộ, hỗ trợ hỏi đáp tài liệu, tra cứu sản phẩm và quản lý theo phòng ban.
+# 🤖 TTTN Chatbot Nội Bộ
+
+Hệ thống chatbot AI dành cho nhân viên nội bộ: hỏi đáp tài liệu (RAG), tra cứu sản phẩm và quản lý theo phòng ban.
+
+🔗 **Live Demo:** [https://chatbotrag-taupe.vercel.app](https://chatbotrag-taupe.vercel.app)
+
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)
+![MongoDB](https://img.shields.io/badge/MongoDB-Atlas-47A248?logo=mongodb&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![OpenAI](https://img.shields.io/badge/OpenAI-412991?logo=openai&logoColor=white)
 
 ---
 
-## Mục lục
+## 📑 Mục lục
 
-- [Tổng quan](#tổng-quan)
-- [Cấu trúc dự án](#cấu-trúc-dự-án)
-- [Yêu cầu hệ thống](#yêu-cầu-hệ-thống)
-- [Cài đặt và chạy](#cài-đặt-và-chạy)
-- [Cấu hình môi trường](#cấu-hình-môi-trường)
-- [Tài khoản mặc định](#tài-khoản-mặc-định)
-- [Tính năng](#tính-năng)
-- [API Reference](#api-reference)
-- [Lỗi thường gặp & cách fix](#lỗi-thường-gặp--cách-fix)
+1. [Tổng quan](#-tổng-quan)
+2. [Kiến trúc hệ thống](#-kiến-trúc-hệ-thống)
+3. [Cấu trúc dự án](#-cấu-trúc-dự-án)
+4. [Yêu cầu hệ thống](#-yêu-cầu-hệ-thống)
+5. [Cài đặt và chạy](#-cài-đặt-và-chạy)
+6. [Cấu hình môi trường](#-cấu-hình-môi-trường)
+7. [Tài khoản mặc định](#-tài-khoản-mặc-định)
+8. [Tính năng](#-tính-năng)
+9. [API Reference](#-api-reference)
+10. [Lỗi thường gặp & cách fix](#-lỗi-thường-gặp--cách-fix)
+11. [Deploy với Docker](#-deploy-với-docker)
+12. [Ghi chú kỹ thuật](#-ghi-chú-kỹ-thuật)
 
 ---
 
-## Tổng quan
+## 📌 Tổng quan
 
-**Stack công nghệ:**
+Dự án gồm 3 thành phần chạy độc lập:
+
+- **Frontend** – giao diện web cho nhân viên, quản lý và admin.
+- **Backend** – xử lý xác thực, phân quyền, CRUD dữ liệu.
+- **AI Service** – microservice RAG: nhúng tài liệu, tìm kiếm vector và sinh câu trả lời.
+
+### Stack công nghệ
 
 | Lớp | Công nghệ |
 |---|---|
@@ -29,99 +47,88 @@ Hệ thống chatbot AI dành cho nhân viên nội bộ, hỗ trợ hỏi đáp
 | AI Service | Python, FastAPI, LangGraph, ChromaDB, OpenAI |
 | Fonts | Plus Jakarta Sans (UI), JetBrains Mono (code) |
 
-**Luồng hoạt động:**
-```
-User → React Frontend → Express Backend (Auth/CRUD)
-                      ↘ FastAPI AI Service (RAG / Chat)
-                            ↘ ChromaDB (Vector Store)
-                            ↘ OpenAI API (LLM)
+---
+
+## 🏗 Kiến trúc hệ thống
+
+```mermaid
+flowchart LR
+    U[👤 User] --> FE[React Frontend]
+    FE -->|Auth / CRUD| BE[Express Backend]
+    FE -->|RAG / Chat| AI[FastAPI AI Service]
+    BE --> DB[(MongoDB Atlas)]
+    AI --> VS[(ChromaDB<br/>Vector Store)]
+    AI --> LLM[OpenAI API]
 ```
 
 ---
 
-## Cấu trúc dự án
+## 📁 Cấu trúc dự án
 
-```
+```text
 TTTNCHATBOT/
-├── frontend/                    # React App
+├── frontend/                        # React App
 │   ├── src/
 │   │   ├── store/
-│   │   │   └── authStore.js     # Zustand auth store (persist)
+│   │   │   └── authStore.js         # Zustand auth store (persist)
 │   │   ├── context/
-│   │   │   └── AuthContext.jsx  # React context wrapping zustand
+│   │   │   └── AuthContext.jsx      # React context wrap Zustand
 │   │   ├── services/
-│   │   │   └── api.js           # Axios + auto token refresh
+│   │   │   └── api.js               # Axios + auto refresh token
 │   │   ├── components/
 │   │   │   ├── layout/
-│   │   │   │   ├── Layout.jsx          # Sidebar + topbar
+│   │   │   │   ├── Layout.jsx           # Sidebar + topbar
 │   │   │   │   └── NotificationBell.jsx
 │   │   │   └── ui/
 │   │   │       └── LoadingSpinner.jsx
 │   │   ├── pages/
 │   │   │   ├── auth/
-│   │   │   │   ├── LoginPage.jsx    # Đăng nhập
-│   │   │   │   ├── RegisterPage.jsx # Đăng ký (mới)
-│   │   │   │   └── ProfilePage.jsx  # Hồ sơ cá nhân
+│   │   │   │   ├── LoginPage.jsx        # Đăng nhập
+│   │   │   │   ├── RegisterPage.jsx     # Đăng ký
+│   │   │   │   └── ProfilePage.jsx      # Hồ sơ cá nhân
 │   │   │   ├── chat/
-│   │   │   │   └── ChatPage.jsx     # Chat AI với session sidebar
+│   │   │   │   └── ChatPage.jsx         # Chat AI + session sidebar
 │   │   │   ├── products/
-│   │   │   │   └── ProductsPage.jsx # CRUD sản phẩm + upload ảnh
+│   │   │   │   └── ProductsPage.jsx     # CRUD sản phẩm + upload ảnh
 │   │   │   ├── knowledge/
-│   │   │   │   └── KnowledgePage.jsx # Upload & quản lý tài liệu
+│   │   │   │   └── KnowledgePage.jsx    # Upload & quản lý tài liệu
 │   │   │   └── admin/
-│   │   │       ├── DashboardPage.jsx   # Biểu đồ, thống kê
-│   │   │       ├── UsersPage.jsx       # Quản lý người dùng
-│   │   │       ├── DepartmentsPage.jsx # Cấu hình phòng ban
-│   │   │       └── AuditPage.jsx       # Audit log
-│   │   ├── App.jsx              # Routes
-│   │   ├── main.jsx             # Entry point
-│   │   └── index.css            # Design system (TailwindCSS)
+│   │   │       ├── DashboardPage.jsx    # Biểu đồ, thống kê
+│   │   │       ├── UsersPage.jsx        # Quản lý người dùng
+│   │   │       ├── DepartmentsPage.jsx  # Cấu hình phòng ban
+│   │   │       └── AuditPage.jsx        # Audit log
+│   │   ├── App.jsx                  # Routes
+│   │   ├── main.jsx                 # Entry point
+│   │   └── index.css                # Design system (TailwindCSS)
 │   ├── package.json
 │   ├── vite.config.js
 │   └── tailwind.config.js
 │
-├── backend/                     # Express API
+├── backend/                         # Express API
 │   ├── src/
 │   │   ├── config/
-│   │   │   └── database.js      # MongoDB Atlas connect
+│   │   │   └── database.js          # Kết nối MongoDB Atlas
 │   │   ├── middleware/
-│   │   │   ├── auth.js          # JWT authenticate middleware
-│   │   │   └── auditMiddleware.js
-│   │   ├── models/
-│   │   │   ├── User.js
-│   │   │   ├── Department.js
-│   │   │   ├── ChatSession.js
-│   │   │   ├── KnowledgeDocument.js
-│   │   │   ├── Product.js
-│   │   │   ├── Notification.js
-│   │   │   └── AuditLog.js
-│   │   ├── routes/
-│   │   │   ├── auth.js          # Login, Register, Refresh, Logout
-│   │   │   ├── users.js
-│   │   │   ├── chat.js
-│   │   │   ├── knowledge.js
-│   │   │   ├── products.js
-│   │   │   ├── departments.js
-│   │   │   ├── admin.js
-│   │   │   ├── audit.js
-│   │   │   └── notifications.js
+│   │   │   ├── auth.js              # JWT authenticate
+│   │   │   └── auditMiddleware.js   # Ghi audit log
+│   │   ├── models/                  # User, Department, ChatSession,
+│   │   │                            # KnowledgeDocument, Product,
+│   │   │                            # Notification, AuditLog
+│   │   ├── routes/                  # auth, users, chat, knowledge,
+│   │   │                            # products, departments, admin,
+│   │   │                            # audit, notifications
 │   │   ├── utils/
-│   │   │   └── seed.js          # Seed data mẫu
+│   │   │   └── seed.js              # Seed data mẫu
 │   │   └── server.js
-│   ├── .env                     # ← PHẢI TẠO FILE NÀY
+│   ├── .env                         # ← PHẢI TỰ TẠO FILE NÀY
 │   └── package.json
 │
-└── ai-service/                  # FastAPI AI
+└── ai-service/                      # FastAPI AI
     ├── app/
-    │   ├── api/
-    │   │   ├── chat.py
-    │   │   ├── knowledge.py
-    │   │   └── products.py
-    │   ├── core/
-    │   │   ├── config.py
-    │   │   └── chroma_client.py
+    │   ├── api/                     # chat.py, knowledge.py, products.py
+    │   ├── core/                    # config.py, chroma_client.py
     │   ├── graph/
-    │   │   └── chat_graph.py    # LangGraph RAG pipeline
+    │   │   └── chat_graph.py        # LangGraph RAG pipeline
     │   ├── services/
     │   │   └── document_service.py
     │   └── main.py
@@ -130,17 +137,19 @@ TTTNCHATBOT/
 
 ---
 
-## Yêu cầu hệ thống
+## ⚙️ Yêu cầu hệ thống
 
-- **Node.js** ≥ 18.x
-- **npm** ≥ 9.x
-- **Python** ≥ 3.10 (cho AI Service)
-- **MongoDB Atlas** account (free tier đủ dùng)
-- **OpenAI API key** (cho AI Service)
+| Thành phần | Phiên bản / Yêu cầu |
+|---|---|
+| Node.js | ≥ 18.x |
+| npm | ≥ 9.x |
+| Python | ≥ 3.10 (cho AI Service) |
+| MongoDB Atlas | Tài khoản free tier là đủ |
+| OpenAI API key | Cần cho AI Service |
 
 ---
 
-## Cài đặt và chạy
+## 🚀 Cài đặt và chạy
 
 ### Bước 1 — Tạo file `.env` cho Backend
 
@@ -158,12 +167,16 @@ NODE_ENV=development
 PORT=5000
 ```
 
->  Thay `MONGODB_URI` bằng connection string thật của bạn từ MongoDB Atlas.
+> 💡 Thay `MONGODB_URI` bằng connection string thật từ MongoDB Atlas.
 
-**Tạo nhanh bằng PowerShell (Windows):**
+<details>
+<summary><b>Tạo nhanh bằng PowerShell (Windows)</b></summary>
+
 ```powershell
 "MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/tttnchatbot?retryWrites=true&w=majority`nJWT_SECRET=tttn_secret_2024`nJWT_REFRESH_SECRET=tttn_refresh_2024`nJWT_EXPIRES_IN=15m`nJWT_REFRESH_EXPIRES_IN=7d`nOPENAI_API_KEY=sk-proj-your-key`nAI_SERVICE_URL=http://localhost:8000`nNODE_ENV=development`nPORT=5000" | Set-Content .env -Encoding utf8
 ```
+
+</details>
 
 ### Bước 2 — Cài và chạy Backend
 
@@ -174,12 +187,13 @@ npm run dev
 ```
 
 Kết quả thành công:
-```
- MongoDB Atlas connected: ...
- Bắt đầu seed database...
- Đã tạo 4 phòng ban
- Đã tạo master admin: admin@tttn.vn / Admin@123456
- Backend running on port 5000
+
+```text
+MongoDB Atlas connected: ...
+Bắt đầu seed database...
+Đã tạo 4 phòng ban
+Đã tạo master admin: admin@tttn.vn / Admin@123456
+Backend running on port 5000
 ```
 
 ### Bước 3 — Cài và chạy Frontend
@@ -202,102 +216,98 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-> AI Service cần OpenAI API key mới hoạt động. Nếu chưa có, chatbot vẫn chạy nhưng không trả lời.
+> ⚠️ AI Service cần OpenAI API key mới hoạt động. Nếu chưa có, chatbot vẫn chạy nhưng không trả lời.
 
 ---
 
-## Cấu hình môi trường
+## 🔧 Cấu hình môi trường
 
 ### Lấy MongoDB URI từ Atlas
 
-1. Vào [MongoDB Atlas](https://cloud.mongodb.com)
-2. Chọn Cluster → **Connect** → **Connect your application**
-3. Copy URI, thay `<password>` bằng mật khẩu thật
-4. Thêm `/tttnchatbot` trước dấu `?`
+1. Vào [MongoDB Atlas](https://cloud.mongodb.com).
+2. Chọn Cluster → **Connect** → **Connect your application**.
+3. Copy URI, thay `<password>` bằng mật khẩu thật.
+4. Thêm `/tttnchatbot` trước dấu `?`.
 
 **Ví dụ URI hợp lệ:**
-```
+
+```text
 mongodb+srv://myuser:mypass@cluster0.abc123.mongodb.net/tttnchatbot?retryWrites=true&w=majority
 ```
 
 ### Whitelist IP trong Atlas
 
-Vào **Network Access** → **Add IP Address** → chọn **Allow Access from Anywhere** (0.0.0.0/0) khi dev.
+Vào **Network Access** → **Add IP Address** → chọn **Allow Access from Anywhere** (`0.0.0.0/0`) khi phát triển.
 
 ---
 
-## Tài khoản mặc định
+## 🔑 Tài khoản mặc định
 
 Được tạo tự động khi backend khởi động lần đầu:
 
-| Role | Email | Mật khẩu |
+| Vai trò | Email | Mật khẩu |
 |---|---|---|
-| Master Admin | admin@tttn.vn | Admin@123456 |
-| HR Manager | hr.manager@tttn.vn | Manager@123 |
-| IT Manager | it.manager@tttn.vn | Manager@123 |
-| Sales Manager | sales.manager@tttn.vn | Manager@123 |
-| Nhân viên | an.nguyen@tttn.vn | Emp@123 |
+| Master Admin | `admin@tttn.vn` | `Admin@123456` |
+| HR Manager | `hr.manager@tttn.vn` | `Manager@123` |
+| IT Manager | `it.manager@tttn.vn` | `Manager@123` |
+| Sales Manager | `sales.manager@tttn.vn` | `Manager@123` |
+| Nhân viên | `an.nguyen@tttn.vn` | `Emp@123` |
 
-> Seed data chỉ chạy khi database **rỗng**. Nếu muốn reset, xóa collection trong Atlas rồi restart backend.
+> 📝 Seed data chỉ chạy khi database **rỗng**. Muốn reset: xoá collection trong Atlas rồi restart backend.
+>
+> 🔒 Đây là tài khoản demo. Hãy đổi mật khẩu nếu deploy thật.
 
 ---
 
-## Tính năng
+## ✨ Tính năng
 
-### Đăng ký / Đăng nhập
-- Trang đăng ký mới tại `/register`
-- Đăng ký tạo tài khoản role `employee`, admin phân phòng ban sau
-- JWT access token (15 phút) + refresh token (7 ngày) tự động rotate
-- Token lưu trong `localStorage` qua Zustand persist
+### 🔐 Đăng ký / Đăng nhập
+- Trang đăng ký tại `/register`, tạo tài khoản role `employee`; admin phân phòng ban sau.
+- JWT access token (15 phút) + refresh token (7 ngày), tự động rotate.
+- Token lưu trong `localStorage` qua Zustand persist.
 
-### Chat AI
-- Tạo session theo phòng ban
-- Lịch sử session hiển thị sidebar trái
-- Hỗ trợ Markdown trong phản hồi AI (bảng, code, danh sách...)
-- Typing indicator khi AI đang xử lý
-- Đánh giá cuộc hội thoại (1–5 sao)
-- Export chat ra file `.txt`
-- Xoá session
+### 💬 Chat AI
+- Tạo session theo phòng ban, lịch sử hiển thị ở sidebar trái.
+- Hỗ trợ Markdown trong phản hồi (bảng, code, danh sách...).
+- Typing indicator khi AI đang xử lý.
+- Đánh giá cuộc hội thoại (1–5 sao).
+- Export chat ra file `.txt`, xoá session.
 
-### Tài liệu nội bộ
-- Upload: PDF, DOCX, TXT, XLSX, CSV, MD (tối đa 50MB)
-- Kéo thả file
-- Master Admin chọn phòng ban khi upload
-- Manager tự động upload vào phòng ban của mình
-- Auto-refresh trạng thái index mỗi 5 giây
-- Xem theo phòng ban, lọc theo trạng thái
+### 📚 Tài liệu nội bộ
+- Upload: PDF, DOCX, TXT, XLSX, CSV, MD (tối đa 50MB), hỗ trợ kéo thả.
+- Master Admin chọn phòng ban khi upload; Manager tự upload vào phòng ban của mình.
+- Tự động cập nhật trạng thái index mỗi 5 giây.
+- Xem theo phòng ban, lọc theo trạng thái.
 
-### Sản phẩm
-- Thêm/sửa/xóa sản phẩm
-- **Upload ảnh sản phẩm** (JPG, PNG, WEBP, tối đa 5MB)
+### 🛒 Sản phẩm
+- Thêm / sửa / xoá sản phẩm, upload ảnh (JPG, PNG, WEBP, tối đa 5MB).
 - Danh mục: Laptop, RAM, SSD, CPU, GPU, Màn hình, Linh kiện, Phụ kiện...
-- Thông số kỹ thuật dạng JSON
-- Tìm kiếm, lọc theo danh mục
-- Phân trang
+- Thông số kỹ thuật dạng JSON.
+- Tìm kiếm, lọc theo danh mục, phân trang.
 
-### Quản lý người dùng (Manager/Admin)
-- Tạo, sửa, xóa tài khoản
-- Phân quyền: employee / manager / master_admin
-- Phân phòng ban
-- Reset mật khẩu
+### 👥 Quản lý người dùng (Manager / Admin)
+- Tạo, sửa, xoá tài khoản.
+- Phân quyền: `employee` / `manager` / `master_admin`.
+- Phân phòng ban, reset mật khẩu.
 
-### Phòng ban (Master Admin)
-- Cấu hình mô tả, màu sắc
-- Tin nhắn chào khi bắt đầu chat
-- System prompt AI riêng cho từng phòng ban
+### 🏢 Phòng ban (Master Admin)
+- Cấu hình mô tả, màu sắc.
+- Tin nhắn chào khi bắt đầu chat.
+- System prompt AI riêng cho từng phòng ban.
 
-### Audit Log (Master Admin)
-- Ghi lại toàn bộ hành động: login, tạo/xóa user, upload tài liệu...
-- Xem chi tiết từng log
-- Lọc theo loại hành động
+### 📋 Audit Log (Master Admin)
+- Ghi lại mọi hành động: đăng nhập, tạo/xoá user, upload tài liệu...
+- Xem chi tiết từng log, lọc theo loại hành động.
 
 ---
 
-## API Reference
+## 📡 API Reference
 
-Base URL: `http://localhost:5000/api`
+**Base URL:** `http://localhost:5000/api`
 
-### Auth
+<details>
+<summary><b>🔐 Auth</b></summary>
+
 | Method | Endpoint | Mô tả |
 |---|---|---|
 | POST | `/auth/login` | Đăng nhập |
@@ -306,130 +316,130 @@ Base URL: `http://localhost:5000/api`
 | POST | `/auth/logout` | Đăng xuất |
 | GET | `/auth/me` | Thông tin user hiện tại |
 
-### Users
+</details>
+
+<details>
+<summary><b>👥 Users</b></summary>
+
 | Method | Endpoint | Mô tả |
 |---|---|---|
 | GET | `/users` | Danh sách users (có phân trang) |
 | POST | `/users` | Tạo user mới |
 | PUT | `/users/:id` | Cập nhật user |
-| DELETE | `/users/:id` | Xóa user |
+| DELETE | `/users/:id` | Xoá user |
 | POST | `/users/:id/reset-password` | Reset mật khẩu |
 
-### Chat
+</details>
+
+<details>
+<summary><b>💬 Chat</b></summary>
+
 | Method | Endpoint | Mô tả |
 |---|---|---|
 | GET | `/chat/sessions` | Danh sách session |
 | POST | `/chat/sessions` | Tạo session mới |
 | GET | `/chat/sessions/:id` | Chi tiết session + messages |
 | POST | `/chat/sessions/:id/message` | Gửi tin nhắn |
-| DELETE | `/chat/sessions/:id` | Xóa session |
+| DELETE | `/chat/sessions/:id` | Xoá session |
 | GET | `/chat/sessions/:id/export` | Export chat |
 | POST | `/chat/sessions/:id/rating` | Đánh giá |
 
-### Knowledge
+</details>
+
+<details>
+<summary><b>📚 Knowledge</b></summary>
+
 | Method | Endpoint | Mô tả |
 |---|---|---|
 | GET | `/knowledge` | Danh sách tài liệu |
 | POST | `/knowledge/upload` | Upload tài liệu (multipart) |
-| DELETE | `/knowledge/:id` | Xóa tài liệu |
+| DELETE | `/knowledge/:id` | Xoá tài liệu |
 | POST | `/knowledge/:id/reindex` | Index lại tài liệu |
 
-### Products
+</details>
+
+<details>
+<summary><b>🛒 Products</b></summary>
+
 | Method | Endpoint | Mô tả |
 |---|---|---|
 | GET | `/products` | Danh sách sản phẩm |
 | POST | `/products` | Tạo sản phẩm (multipart + image) |
 | PUT | `/products/:id` | Cập nhật sản phẩm |
-| DELETE | `/products/:id` | Xóa sản phẩm |
+| DELETE | `/products/:id` | Xoá sản phẩm |
 
-### Departments
+</details>
+
+<details>
+<summary><b>🏢 Departments · 📊 Admin · 📋 Audit · 🔔 Notifications</b></summary>
+
 | Method | Endpoint | Mô tả |
 |---|---|---|
 | GET | `/departments` | Danh sách phòng ban |
 | PUT | `/departments/:id` | Cập nhật phòng ban |
-
-### Admin
-| Method | Endpoint | Mô tả |
-|---|---|---|
 | GET | `/admin/dashboard` | Thống kê tổng quan |
-
-### Audit
-| Method | Endpoint | Mô tả |
-|---|---|---|
 | GET | `/audit` | Danh sách audit log |
-
-### Notifications
-| Method | Endpoint | Mô tả |
-|---|---|---|
 | GET | `/notifications` | Danh sách thông báo |
 | PUT | `/notifications/read-all` | Đánh dấu đọc hết |
 
+</details>
+
 ---
 
-## Lỗi thường gặp & cách fix
+## 🛠 Lỗi thường gặp & cách fix
 
 ### ❌ `MongoDB connection error: querySrv ENOTFOUND`
-**Nguyên nhân:** File `.env` chưa được tạo hoặc bị lỗi encoding.
+- **Nguyên nhân:** File `.env` chưa được tạo hoặc bị lỗi encoding.
+- **Fix:** chạy trong thư mục `backend/`:
+  ```powershell
+  "MONGODB_URI=mongodb+srv://..." | Set-Content .env -Encoding utf8
+  ```
 
-**Fix:**
-```powershell
-# Chạy trong thư mục backend/
-"MONGODB_URI=mongodb+srv://..." | Set-Content .env -Encoding utf8
-```
+### ❌ `Cannot find module './store/authStore'`
+- **Nguyên nhân:** Thiếu file `src/store/authStore.js`.
+- **Fix:** File này có sẵn trong project, hãy đảm bảo giải nén đúng thư mục.
 
-###  `Cannot find module './store/authStore'`
-**Nguyên nhân:** File `src/store/authStore.js` bị thiếu.
+### ❌ Vite lỗi import path
+- **Nguyên nhân:** Có thể xuất hiện folder tên `{auth,chat,...}` do lỗi brace expansion của `mkdir` trên Linux.
+- **Fix:** Xoá các folder tên lạ đó, chúng chỉ là artifact lỗi.
 
-**Fix:** File này có trong project. Đảm bảo giải nén đúng thư mục.
+### ❌ Đăng ký không hoạt động
+- **Nguyên nhân:** Backend chưa có route `/auth/register`.
+- **Fix:** Route đã được thêm trong `backend/src/routes/auth.js`.
 
-###  Vite lỗi import path
-**Nguyên nhân:** Có thể xuất hiện folder tên `{auth,chat,...}` do lỗi `mkdir` brace expansion trên Linux.
+### ❌ Upload ảnh sản phẩm không hoạt động
+- **Nguyên nhân:** Route `/products` cần hỗ trợ `multipart/form-data` với field `image`.
+- **Kiểm tra:** `backend/src/routes/products.js` phải dùng middleware `multer`.
 
-**Fix:** Xóa các folder tên lạ đó đi, chúng là artifact lỗi, không cần thiết.
+### ❌ Không hiện dropdown chọn phòng ban khi upload tài liệu
+- **Nguyên nhân:** Logic cũ chỉ hiện dropdown với `master_admin` và không fetch departments trước.
+- **Fix:** Đã sửa, dropdown hiện với `master_admin` và user chưa có phòng ban; departments được fetch khi mở trang.
 
-###  Đăng ký không hoạt động
-**Nguyên nhân:** Backend chưa có route `/auth/register`.
+### ❌ Frontend chạy ở port 3000 thay vì 5173
+- Vite mặc định dùng **5173**. Nếu thấy 3000 nghĩa là bạn đã config custom trong `vite.config.js`.
 
-**Fix:** Route đã được thêm vào file `backend/src/routes/auth.js` trong phiên bản này.
-
-###  Upload ảnh sản phẩm không hoạt động
-**Nguyên nhân:** Backend route `/products` cần hỗ trợ `multipart/form-data` với field `image`.
-
-**Kiểm tra:** `backend/src/routes/products.js` phải dùng `multer` middleware.
-
-### Chọn phòng ban khi upload tài liệu không hiện dropdown
-**Nguyên nhân:** Logic cũ chỉ hiện dropdown với `master_admin` nhưng không fetch departments trước.
-
-**Fix:** Đã sửa — dropdown hiện với `master_admin` và user chưa có phòng ban. Data departments được fetch khi mở trang.
-
-###  Frontend chạy ở port khác (3000 thay vì 5173)
-Kiểm tra `vite.config.js`, mặc định Vite dùng **5173**. Nếu thấy port 3000 là do đã config custom.
-
-###  CORS error khi frontend gọi API
-**Fix:** `backend/src/server.js` phải có:
-```js
-app.use(cors({ origin: ['http://localhost:5173', 'http://localhost:3000'] }))
-```
+### ❌ CORS error khi frontend gọi API
+- **Fix:** `backend/src/server.js` phải có:
+  ```js
+  app.use(cors({ origin: ['http://localhost:5173', 'http://localhost:3000'] }))
+  ```
 
 ---
 
-## Deploy với Docker
+## 🐳 Deploy với Docker
+
+Tạo file `.env` ở thư mục gốc, sau đó chạy:
 
 ```bash
 # Từ thư mục gốc TTTNCHATBOT/
 docker-compose up --build
 ```
 
-Cần tạo file `.env` ở thư mục gốc trước khi chạy Docker.
-
 ---
 
-## Ghi chú
+## 📝 Ghi chú kỹ thuật
 
-- **Auth system:** Dùng Zustand (`store/authStore.js`) làm single source of truth. `AuthContext` wrap lại Zustand để các component dùng `useAuth()` vẫn hoạt động bình thường.
-- **Token storage:** Access token & refresh token lưu trong `localStorage` key `tttn-auth` (Zustand persist). Interceptor axios tự đọc và tự refresh khi nhận 401.
-- **Seed data:** Chỉ chạy 1 lần khi database rỗng. Logic check `User.countDocuments() === 0`.
+- **Auth system:** Dùng Zustand (`store/authStore.js`) làm single source of truth. `AuthContext` wrap lại Zustand để các component vẫn dùng `useAuth()` bình thường.
+- **Token storage:** Access token & refresh token lưu trong `localStorage` key `tttn-auth` (Zustand persist). Axios interceptor tự đọc và tự refresh khi nhận 401.
+- **Seed data:** Chỉ chạy 1 lần khi database rỗng (check `User.countDocuments() === 0`).
 - **AI Service:** Là microservice độc lập, backend gọi qua HTTP. Nếu AI Service down, chat vẫn tạo được session nhưng không nhận được phản hồi AI.
-#   c h a t b o t r a g 
- 
- 
